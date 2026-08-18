@@ -18,6 +18,7 @@ mod highlight;
 mod images;
 mod install;
 mod macos;
+mod mermaid;
 mod render;
 mod theme;
 
@@ -50,6 +51,20 @@ fn list_themes() {
         };
         println!("  {:<14} {:<14} {}", t.id, t.name, kind);
     }
+}
+
+/// Embedded app icon (macOS-style squircle composed from logo.png) used as
+/// the window/Dock icon. Regenerate with `just icon`.
+fn load_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../assets/mdbijou-icon-1024.png"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
 }
 
 fn main() -> eframe::Result {
@@ -110,11 +125,22 @@ fn main() -> eframe::Result {
 
     let path = file.map(std::path::PathBuf::from);
 
+    // Forward macOS "open documents" requests (Finder double-click, `open`,
+    // Dock drop) into the app. Must be installed before `run_native`: AppKit
+    // may deliver launch-time open requests before the first frame.
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    macos::install_open_file_handler(open_tx);
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("mdbijou")
+        .with_inner_size([1024.0, 760.0])
+        .with_min_inner_size([560.0, 420.0]);
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("mdbijou")
-            .with_inner_size([1024.0, 760.0])
-            .with_min_inner_size([560.0, 420.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -122,6 +148,13 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "mdbijou",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::MdbijouApp::new(cc, cfg2, path.clone())))),
+        Box::new(move |cc| {
+            Ok(Box::new(app::MdbijouApp::new(
+                cc,
+                cfg2,
+                path.clone(),
+                open_rx,
+            )))
+        }),
     )
 }
