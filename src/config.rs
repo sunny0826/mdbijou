@@ -11,7 +11,6 @@ pub struct Config {
     pub font_size: f32,
     pub line_height: f32,
     pub content_width: f32,
-    pub watch: bool,
     pub follow_system_theme: bool,
     // editor (v0.2)
     pub default_view: View,
@@ -22,17 +21,12 @@ pub struct Config {
     pub auto_save: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum View {
+    #[default]
     Preview,
     Edit,
-}
-
-impl Default for View {
-    fn default() -> Self {
-        View::Preview
-    }
 }
 
 impl Default for Config {
@@ -42,7 +36,6 @@ impl Default for Config {
             font_size: 16.0,
             line_height: 1.5,
             content_width: 720.0,
-            watch: true,
             follow_system_theme: false,
             default_view: View::Preview,
             editor_font_size: 15.0,
@@ -65,8 +58,12 @@ pub fn config_file() -> Option<PathBuf> {
 }
 
 pub fn load() -> Config {
-    let Some(path) = config_file() else { return Config::default() };
-    let Ok(raw) = std::fs::read_to_string(&path) else { return Config::default() };
+    let Some(path) = config_file() else {
+        return Config::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Config::default();
+    };
     toml::from_str(&raw).unwrap_or_default()
 }
 
@@ -83,7 +80,12 @@ pub fn save(cfg: &Config) {
 /// Write atomically (temp file + rename) to avoid partial writes / watch loops.
 pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let tmp = dir.join(format!(".{}.tmp", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        path.file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default()
+    ));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)?;
     Ok(())

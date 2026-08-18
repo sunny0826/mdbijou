@@ -21,15 +21,14 @@ pub fn install_cjk_fonts(fonts: &mut FontDefinitions) -> Option<()> {
             if bytes.len() < 1000 {
                 continue;
             }
-            let name = format!("cjk_{}", std::path::Path::new(path).file_name()?.to_string_lossy());
+            let name = format!(
+                "cjk_{}",
+                std::path::Path::new(path).file_name()?.to_string_lossy()
+            );
             let data = std::sync::Arc::new(FontData::from_owned(bytes));
             fonts.font_data.insert(name.clone(), data);
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push(name.clone());
+                fonts.families.entry(family).or_default().push(name.clone());
             }
             return Some(());
         }

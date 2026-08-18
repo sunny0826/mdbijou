@@ -28,9 +28,11 @@ pub struct Colors {
     pub code_bg: Color32,
     pub blockquote_fg: Color32,
     pub blockquote_bar: Color32,
+    pub quote_bg: Color32,
     pub link: Color32,
     pub table_border: Color32,
     pub table_header_bg: Color32,
+    pub stripe_bg: Color32,
     pub hr: Color32,
     pub selection_bg: Color32,
     pub image_bg: Color32,
@@ -57,7 +59,11 @@ pub struct SyntaxColors {
 fn hex(s: &str) -> Color32 {
     let s = s.trim_start_matches('#');
     let v = u32::from_str_radix(s, 16).unwrap_or(0);
-    Color32::from_rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+    Color32::from_rgb(
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        (v & 0xff) as u8,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -91,8 +97,10 @@ fn github_light() -> Theme {
         code_bg: hex("#f6f8fa"),
         blockquote_fg: hex("#57606a"),
         blockquote_bar: hex("#d0d7de"),
+        quote_bg: hex("#f6f8fa"),
         link: hex("#0969da"),
         table_border: hex("#d8dee4"),
+        stripe_bg: hex("#f6f8fa"),
         table_header_bg: hex("#f6f8fa"),
         hr: hex("#d8dee4"),
         selection_bg: hex("#b6d7ff"),
@@ -113,7 +121,13 @@ fn github_light() -> Theme {
         markup_link: hex("#0969da"),
         markup_code: hex("#e01e5a"),
     };
-    Theme { id: "github-light".into(), name: "GitHub Light".into(), kind: ThemeKind::Light, c, syntax }
+    Theme {
+        id: "github-light".into(),
+        name: "GitHub Light".into(),
+        kind: ThemeKind::Light,
+        c,
+        syntax,
+    }
 }
 
 fn github_dark() -> Theme {
@@ -126,9 +140,11 @@ fn github_dark() -> Theme {
         code_bg: hex("#161b22"),
         blockquote_fg: hex("#8b949e"),
         blockquote_bar: hex("#30363d"),
+        quote_bg: hex("#161b22"),
         link: hex("#58a6ff"),
         table_border: hex("#30363d"),
         table_header_bg: hex("#161b22"),
+        stripe_bg: hex("#1c2128"),
         hr: hex("#30363d"),
         selection_bg: hex("#264f78"),
         image_bg: hex("#161b22"),
@@ -148,7 +164,13 @@ fn github_dark() -> Theme {
         markup_link: hex("#58a6ff"),
         markup_code: hex("#ff7b72"),
     };
-    Theme { id: "github-dark".into(), name: "GitHub Dark".into(), kind: ThemeKind::Dark, c, syntax }
+    Theme {
+        id: "github-dark".into(),
+        name: "GitHub Dark".into(),
+        kind: ThemeKind::Dark,
+        c,
+        syntax,
+    }
 }
 
 fn sepia() -> Theme {
@@ -161,9 +183,11 @@ fn sepia() -> Theme {
         code_bg: hex("#efe4c8"),
         blockquote_fg: hex("#8b7b6a"),
         blockquote_bar: hex("#c8b890"),
+        quote_bg: hex("#efe4c8"),
         link: hex("#8b5a00"),
         table_border: hex("#d6c8a8"),
         table_header_bg: hex("#efe4c8"),
+        stripe_bg: hex("#eadfc0"),
         hr: hex("#d6c8a8"),
         selection_bg: hex("#dccfae"),
         image_bg: hex("#efe4c8"),
@@ -183,7 +207,13 @@ fn sepia() -> Theme {
         markup_link: hex("#8b5a00"),
         markup_code: hex("#b58900"),
     };
-    Theme { id: "sepia".into(), name: "Sepia".into(), kind: ThemeKind::Light, c, syntax }
+    Theme {
+        id: "sepia".into(),
+        name: "Sepia".into(),
+        kind: ThemeKind::Light,
+        c,
+        syntax,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,17 +226,16 @@ pub struct ThemeRegistry {
 
 impl ThemeRegistry {
     pub fn new() -> Self {
-        Self { themes: builtin_ids().iter().filter_map(|(id, _, _)| builtin(id)).collect() }
+        Self {
+            themes: builtin_ids()
+                .iter()
+                .filter_map(|(id, _, _)| builtin(id))
+                .collect(),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Theme> {
         self.themes.iter().find(|t| t.id == id)
-    }
-
-    pub fn cycle(&self, current: &str) -> &Theme {
-        let idx = self.themes.iter().position(|t| t.id == current).unwrap_or(0);
-        let next = (idx + 1) % self.themes.len().max(1);
-        &self.themes[next]
     }
 }
 

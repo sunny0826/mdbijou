@@ -1,15 +1,18 @@
 //! Application shell: eframe::App tying together config, document, theme,
-//! highlighter, preview renderer and the simple editor, plus the
+//! highlighter, image loading, preview renderer and the simple editor, plus the
 //! preview/edit view state machine and save flow.
 
 use crate::config::{self, Config, View};
 use crate::document::Document;
 use crate::editor::Editor;
 use crate::highlight::{self, Highlighter};
+use crate::images::ImageStore;
 use crate::render::RenderCtx;
 use crate::theme::{Theme, ThemeRegistry};
 use eframe::egui;
 use egui::{Color32, RichText};
+use std::path::PathBuf;
+use std::time::Instant;
 
 pub struct MdbijouApp {
     cfg: Config,
@@ -18,11 +21,14 @@ pub struct MdbijouApp {
     theme_id: String,
     view: View,
     hl: Box<dyn Highlighter>,
-    last_edit_saved: std::time::Instant,
+    images: ImageStore,
+    last_edit_saved: Instant,
     need_reparse: bool,
     /// A file the user chose to open but which we are holding for confirmation
     /// because the current document has unsaved changes.
-    pending_open: Option<std::path::PathBuf>,
+    pending_open: Option<PathBuf>,
+    /// Transient save/status feedback: (expiry, message, color).
+    feedback: Option<(Instant, String, Color32)>,
 }
 
 #[derive(Debug)]
@@ -31,12 +37,12 @@ enum Cmd {
     Save,
     SaveAs,
     Reload,
-    CycleTheme,
+    SetTheme(String),
     Open,
 }
 
 impl MdbijouApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, path: Option<std::path::PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut cfg: Config, path: Option<PathBuf>) -> Self {
         let text = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -46,17 +52,30 @@ impl MdbijouApp {
             None => Document::new(text),
         };
         let registry = ThemeRegistry::new();
-        let theme_id = if registry.get(&cfg.theme).is_some() { cfg.theme.clone() } else { "github-light".into() };
+        let mut theme_id = if registry.get(&cfg.theme).is_some() {
+            cfg.theme.clone()
+        } else {
+            "github-light".into()
+        };
+        // Respect "follow system theme" unless the user pinned a specific theme.
+        if cfg.follow_system_theme {
+            let dark = cc.egui_ctx.system_theme() == Some(egui::Theme::Dark);
+            theme_id = if dark {
+                "github-dark".into()
+            } else {
+                "github-light".into()
+            };
+            cfg.theme = theme_id.clone();
+        }
         let theme = registry.get(&theme_id).unwrap().clone();
         let hl = highlight::new_highlighter(&theme);
+        let images = ImageStore::new(base_dir_for(&doc));
 
         // Install CJK fonts.
         let mut fonts = egui::FontDefinitions::default();
         crate::fonts::install_cjk_fonts(&mut fonts);
         cc.egui_ctx.set_fonts(fonts);
 
-        // Default view from config, overridable via CLI handled during run (we
-        // keep config's view; CLI --edit is passed as cfg.default_view).
         let view = cfg.default_view;
 
         Self {
@@ -66,14 +85,18 @@ impl MdbijouApp {
             theme_id,
             view,
             hl,
-            last_edit_saved: std::time::Instant::now(),
+            images,
+            last_edit_saved: Instant::now(),
             need_reparse: false,
             pending_open: None,
+            feedback: None,
         }
     }
 
     fn theme(&self) -> &Theme {
-        self.registry.get(&self.theme_id).unwrap_or(&self.registry.themes[0])
+        self.registry
+            .get(&self.theme_id)
+            .unwrap_or(&self.registry.themes[0])
     }
 
     fn rebuild_highlighter(&mut self) {
@@ -85,20 +108,23 @@ impl MdbijouApp {
         if self.registry.get(id).is_some() {
             self.theme_id = id.to_string();
             self.cfg.theme = id.to_string();
-            let _ = config::save(&self.cfg);
+            // Manually picking a theme overrides system-follow.
+            self.cfg.follow_system_theme = false;
+            config::save(&self.cfg);
             self.rebuild_highlighter();
         }
     }
 
-    fn load_document(&mut self, path: &std::path::Path) {
+    fn load_document(&mut self, path: &PathBuf) {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                self.doc = Document::with_path(path.to_path_buf(), text);
+                self.doc = Document::with_path(path.clone(), text);
             }
             Err(e) => {
-                self.doc = Document::with_path(path.to_path_buf(), format!("# 无法打开文件\n\n{e}"));
+                self.doc = Document::with_path(path.clone(), format!("# 无法打开文件\n\n{e}"));
             }
         }
+        self.images = ImageStore::new(base_dir_for(&self.doc));
     }
 
     fn save(&mut self) -> bool {
@@ -108,6 +134,9 @@ impl MdbijouApp {
         let ok = config::atomic_write(&path, self.doc.text.as_bytes()).is_ok();
         if ok {
             self.doc.dirty = false;
+            self.flash("已保存", Color32::from_rgb(70, 170, 90));
+        } else {
+            self.flash("保存失败", Color32::from_rgb(220, 90, 70));
         }
         ok
     }
@@ -122,14 +151,22 @@ impl MdbijouApp {
             if ok {
                 self.doc.path = Some(path);
                 self.doc.dirty = false;
+                self.flash("已保存", Color32::from_rgb(70, 170, 90));
                 return true;
             }
         }
+        self.flash("保存取消或失败", Color32::from_rgb(220, 90, 70));
         false
     }
 
-    /// Show the native open-file dialog, then (if the current document is
-    /// dirty) defer to the unsaved-changes confirmation.
+    fn flash(&mut self, msg: &str, color: Color32) {
+        self.feedback = Some((
+            Instant::now() + std::time::Duration::from_secs(3),
+            msg.to_string(),
+            color,
+        ));
+    }
+
     fn open_via_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Markdown", &["md", "markdown", "txt"])
@@ -142,7 +179,7 @@ impl MdbijouApp {
 
     /// Offer to open `path`; if the document has unsaved edits, hold it for
     /// confirmation instead of silently discarding (design §8.5).
-    fn request_open(&mut self, path: std::path::PathBuf) {
+    fn request_open(&mut self, path: PathBuf) {
         if self.doc.dirty {
             self.pending_open = Some(path);
         } else {
@@ -150,7 +187,7 @@ impl MdbijouApp {
         }
     }
 
-    fn apply_open(&mut self, path: std::path::PathBuf) {
+    fn apply_open(&mut self, path: PathBuf) {
         self.load_document(&path);
         self.pending_open = None;
         self.view = self.cfg.default_view;
@@ -158,7 +195,9 @@ impl MdbijouApp {
 
     /// Render the unsaved-changes confirmation modal (if one is pending).
     fn show_open_confirm(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.pending_open.clone() else { return };
+        let Some(path) = self.pending_open.clone() else {
+            return;
+        };
         let name = path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -169,14 +208,12 @@ impl MdbijouApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!("当前文档有未保存的修改。"));
+                ui.label("当前文档有未保存的修改。");
                 ui.label(format!("是否先保存，再打开 “{name}”？"));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("保存并打开").clicked() {
-                        if self.save() {
-                            self.apply_open(path.clone());
-                        }
+                    if ui.button("保存并打开").clicked() && self.save() {
+                        self.apply_open(path.clone());
                     }
                     if ui.button("放弃并打开").clicked() {
                         self.apply_open(path.clone());
@@ -194,76 +231,126 @@ impl MdbijouApp {
                 if self.view == View::Preview {
                     self.view = View::Edit;
                 } else {
-                    // switch to preview -> reparse from buffer
                     self.doc.reparse();
                     self.view = View::Preview;
                 }
             }
             Cmd::Save => {
-                self.save();
+                let _ = self.save();
             }
             Cmd::SaveAs => {
-                self.save_as();
+                let _ = self.save_as();
             }
             Cmd::Reload => {
                 if let Some(p) = self.doc.path.clone() {
-                    let dirty = self.doc.dirty;
-                    if !dirty {
+                    if !self.doc.dirty {
                         self.load_document(&p);
                     }
                 }
             }
-            Cmd::CycleTheme => {
-                let next = self.registry.cycle(&self.theme_id).id.clone();
-                self.switch_theme(&next);
-            }
-            Cmd::Open => {
-                self.open_via_dialog();
-            }
+            Cmd::SetTheme(id) => self.switch_theme(&id),
+            Cmd::Open => self.open_via_dialog(),
         }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let muted = self.theme().c.muted;
-        let theme_id = self.theme_id.clone();
-        let dirty = self.doc.dirty;
         let title = self
             .doc
             .path
             .as_ref()
-            .map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())
+            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
             .unwrap_or_else(|| "untitled".into());
+        let dirty = self.doc.dirty;
 
         ui.horizontal_wrapped(|ui| {
-            let title_resp = ui.add(
-                egui::Label::new(
-                    RichText::new(format!("{} {}", if dirty { "●" } else { "○" }, title))
-                        .color(if dirty { Color32::from_rgb(230, 120, 40) } else { muted }),
-                ),
-            );
+            // --- Document title + persist state (not color-only) ---
+            let (dot, state) = if dirty {
+                ("●", "未保存")
+            } else {
+                ("○", "已保存")
+            };
+            let title_resp = ui.add(egui::Label::new(
+                RichText::new(format!("{dot} {title} · {state}")).color(if dirty {
+                    Color32::from_rgb(230, 120, 40)
+                } else {
+                    muted
+                }),
+            ));
             if let Some(p) = &self.doc.path {
                 title_resp.on_hover_text(p.display().to_string());
             }
             ui.separator();
 
-            if ui.button("打开").clicked() {
+            // --- Actions, each with an accessible name + shortcut hint ---
+            if ui
+                .add(egui::Button::new("打开"))
+                .on_hover_text("⌘O")
+                .clicked()
+            {
                 self.dispatch(Cmd::Open);
             }
-            let view_label = if self.view == View::Preview { "编辑" } else { "预览" };
-            if ui.button(view_label).clicked() {
+            let view_label = if self.view == View::Preview {
+                "编辑"
+            } else {
+                "预览"
+            };
+            let view_hint = if self.view == View::Preview {
+                "⌘E — 编辑源码"
+            } else {
+                "⌘E — 返回预览"
+            };
+            if ui
+                .add(egui::Button::new(view_label))
+                .on_hover_text(view_hint)
+                .clicked()
+            {
                 self.dispatch(Cmd::ToggleView);
             }
-            if ui.button("保存").clicked() {
+            if ui
+                .add(egui::Button::new("保存"))
+                .on_hover_text("⌘S")
+                .clicked()
+            {
                 self.dispatch(Cmd::Save);
             }
-            if ui.button("另存").clicked() {
+            if ui
+                .add(egui::Button::new("另存"))
+                .on_hover_text("⇧⌘S")
+                .clicked()
+            {
                 self.dispatch(Cmd::SaveAs);
             }
-            if ui.button("主题").clicked() {
-                self.dispatch(Cmd::CycleTheme);
-            }
             ui.separator();
-            ui.label(RichText::new(&theme_id).small().color(muted));
+
+            // --- Theme as a visible menu (UI-MD-012) ---
+            let theme_name = self.theme().name.clone();
+            let current = self.theme_id.clone();
+            let themes: Vec<(String, String)> = self
+                .registry
+                .themes
+                .iter()
+                .map(|t| (t.id.clone(), t.name.clone()))
+                .collect();
+            let mut picked = current.clone();
+            egui::ComboBox::from_id_salt("theme_picker")
+                .selected_text(RichText::new(theme_name).color(muted))
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    for (id, name) in &themes {
+                        ui.selectable_value(&mut picked, id.clone(), name.clone());
+                    }
+                });
+            if picked != current {
+                self.dispatch(Cmd::SetTheme(picked));
+            }
+
+            // --- Save feedback ---
+            if let Some((expiry, msg, color)) = &self.feedback {
+                if *expiry > Instant::now() {
+                    ui.label(RichText::new(msg).color(*color));
+                }
+            }
         });
     }
 }
@@ -281,9 +368,6 @@ impl eframe::App for MdbijouApp {
             } else {
                 self.dispatch(Cmd::Save);
             }
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {
-            self.dispatch(Cmd::CycleTheme);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
             self.dispatch(Cmd::Reload);
@@ -306,6 +390,8 @@ impl eframe::App for MdbijouApp {
         visuals.window_fill = bg;
         visuals.override_text_color = Some(fg);
         visuals.selection.bg_fill = sel;
+        visuals.selection.stroke = egui::Stroke::new(1.0, sel);
+        visuals.widgets.hovered.weak_bg_fill = th.c.code_bg;
         ctx.set_visuals(visuals);
 
         // ------- top bar -------
@@ -315,7 +401,11 @@ impl eframe::App for MdbijouApp {
 
         // ------- central panel: preview or edit -------
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(bg))
+            .frame(
+                egui::Frame::new()
+                    .fill(bg)
+                    .inner_margin(egui::Margin::symmetric(0, 8)),
+            )
             .show(ctx, |ui| {
                 if self.view == View::Preview {
                     self.show_preview(ui);
@@ -328,39 +418,47 @@ impl eframe::App for MdbijouApp {
         self.show_open_confirm(ctx);
 
         // ------- auto-save -------
-        if self.cfg.auto_save && self.doc.dirty {
-            if self.last_edit_saved.elapsed().as_millis() > 800 {
-                self.save();
-                self.last_edit_saved = std::time::Instant::now();
-            }
+        if self.cfg.auto_save && self.doc.dirty && self.last_edit_saved.elapsed().as_millis() > 800
+        {
+            let _ = self.save();
+            self.last_edit_saved = Instant::now();
         }
     }
 }
 
 impl MdbijouApp {
     fn show_preview(&mut self, ui: &mut egui::Ui) {
-        // Deferred reparse if needed.
         if self.need_reparse {
             self.doc.reparse();
             self.need_reparse = false;
         }
         let theme = self.theme().clone();
-        let width = self.cfg.content_width;
-        let font_size = self.cfg.font_size;
-        let mut rctx = RenderCtx::new(&theme, &mut *self.hl, width, font_size);
+        // Responsive reading column (UI-MD-002): never grow beyond the window,
+        // keep a stable small gutter on narrow windows, center on wide ones.
+        let avail = ui.available_width().max(20.0);
+        let effective = self.cfg.content_width.min(avail - 2.0 * 12.0);
+        let pad = ((avail - effective) * 0.5).max(12.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // Center the content column.
-            let avail = ui.available_width();
-            let pad = ((avail - width) * 0.5).max(12.0);
-            ui.horizontal(|ui| {
-                ui.add_space(pad);
-                ui.vertical(|ui| {
-                    ui.set_min_width(width);
-                    crate::render::render_document(ui, &self.doc, &mut rctx);
+        let mut rctx = RenderCtx::new(
+            &theme,
+            &mut *self.hl,
+            &mut self.images,
+            effective,
+            self.cfg.font_size,
+            self.cfg.line_height,
+        );
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(pad);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(effective);
+                        crate::render::render_document(ui, &self.doc, &mut rctx);
+                    });
                 });
             });
-        });
     }
 
     fn show_editor(&mut self, ui: &mut egui::Ui) {
@@ -368,7 +466,15 @@ impl MdbijouApp {
         let mut editor = Editor::new(&self.cfg, &theme);
         let res = editor.show(ui, &mut self.doc, &mut *self.hl);
         if res.changed {
-            self.last_edit_saved = std::time::Instant::now();
+            self.last_edit_saved = Instant::now();
+            self.need_reparse = true;
         }
     }
+}
+
+fn base_dir_for(doc: &Document) -> PathBuf {
+    doc.path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }

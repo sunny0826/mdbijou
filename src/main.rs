@@ -15,6 +15,7 @@ mod document;
 mod editor;
 mod fonts;
 mod highlight;
+mod images;
 mod render;
 mod theme;
 

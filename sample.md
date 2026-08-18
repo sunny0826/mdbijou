@@ -43,3 +43,13 @@ fn main() {
 ---
 
 正文结束。
+
+## HTML 与图片
+
+这是一个 HTML 段落：<span style="color: red">红色文字</span> 与 <b>加粗</b>。
+
+<div>
+  <p>块级 HTML 内容（仅作为文本显示，不执行）。</p>
+</div>
+
+![远程示例图片](https://picsum.photos/400/200)

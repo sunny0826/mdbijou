@@ -17,7 +17,7 @@
 | 打开/渲染 Markdown | `mdbijou file.md` |
 | 简单编辑器 | `Cmd+E` 切换编辑/预览，`Cmd+S` 保存、`Cmd+Shift+S` 另存 |
 | 语法高亮 | Markdown 全文 + 内嵌代码块（`syntect`，可裁剪） |
-| 主题切换 | `Cmd+T` 循环 / `--theme <id>` |
+| 主题切换 | 顶栏「主题」下拉菜单 / `--theme <id>`（手动选择后优先于跟随系统） |
 | 快捷键 | `Cmd+O` 打开、`Cmd+R` 重载、`Cmd+Z` 撤销等 |
 | 未保存保护 | 打开新文件前弹「保存/放弃/取消」确认 |
 
@@ -103,17 +103,13 @@ src/
   theme.rs       主题模型 + 内置主题
   config.rs      配置读写（~/.config/mdbijou/config.toml）
   fonts.rs       CJK 字体加载
+  images.rs      图片加载与缓存（本地 + 远程）
 scripts/
   install.sh     安装脚本
   bench.sh       体积 / 启动基线
 justfile         命令编排
 docs/            设计文档（DESIGN.md / TASKS.md）
 ```
-
-## 设计文档
-
-- [DESIGN.md](docs/DESIGN.md) — 架构与设计决议
-- [TASKS.md](docs/TASKS.md) — 任务拆分
 
 ## License
 
