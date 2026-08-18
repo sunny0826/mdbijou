@@ -1,16 +1,19 @@
 //! Application shell: eframe::App tying together config, document, theme,
 //! highlighter, image loading, preview renderer and the simple editor, plus the
-//! preview/edit view state machine and save flow.
+//! preview/edit view state machine, the traffic-light toolbar, and the settings
+//! page.
 
 use crate::config::{self, Config, View};
 use crate::document::Document;
 use crate::editor::Editor;
 use crate::highlight::{self, Highlighter};
 use crate::images::ImageStore;
+use crate::install;
 use crate::render::RenderCtx;
 use crate::theme::{Theme, ThemeRegistry};
 use eframe::egui;
 use egui::{Color32, RichText};
+use egui_phosphor::regular;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -29,20 +32,25 @@ pub struct MdbijouApp {
     pending_open: Option<PathBuf>,
     /// Transient save/status feedback: (expiry, message, color).
     feedback: Option<(Instant, String, Color32)>,
+    /// Whether the settings page is open.
+    show_settings: bool,
+    /// Result of the last CLI-install attempt, shown in the settings page.
+    cli_status: Option<install::InstallResult>,
 }
 
 #[derive(Debug)]
 enum Cmd {
     ToggleView,
     Save,
-    SaveAs,
     Reload,
-    SetTheme(String),
     Open,
+    ToggleSettings,
 }
 
 impl MdbijouApp {
     pub fn new(cc: &eframe::CreationContext<'_>, mut cfg: Config, path: Option<PathBuf>) -> Self {
+        crate::macos::configure_title_bar(cc);
+
         let text = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -71,9 +79,10 @@ impl MdbijouApp {
         let hl = highlight::new_highlighter(&theme);
         let images = ImageStore::new(base_dir_for(&doc));
 
-        // Install CJK fonts.
+        // Install CJK fonts and the Phosphor icon font.
         let mut fonts = egui::FontDefinitions::default();
         crate::fonts::install_cjk_fonts(&mut fonts);
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
         let view = cfg.default_view;
@@ -90,6 +99,8 @@ impl MdbijouApp {
             need_reparse: false,
             pending_open: None,
             feedback: None,
+            show_settings: false,
+            cli_status: None,
         }
     }
 
@@ -111,6 +122,17 @@ impl MdbijouApp {
             // Manually picking a theme overrides system-follow.
             self.cfg.follow_system_theme = false;
             config::save(&self.cfg);
+            self.rebuild_highlighter();
+        }
+    }
+
+    /// Re-derive the light/dark theme from the system preference.
+    fn apply_follow_system(&mut self, ctx: &egui::Context) {
+        let dark = ctx.system_theme() == Some(egui::Theme::Dark);
+        let id = if dark { "github-dark" } else { "github-light" };
+        if self.registry.get(id).is_some() {
+            self.theme_id = id.to_string();
+            self.cfg.theme = id.to_string();
             self.rebuild_highlighter();
         }
     }
@@ -238,9 +260,6 @@ impl MdbijouApp {
             Cmd::Save => {
                 let _ = self.save();
             }
-            Cmd::SaveAs => {
-                let _ = self.save_as();
-            }
             Cmd::Reload => {
                 if let Some(p) = self.doc.path.clone() {
                     if !self.doc.dirty {
@@ -248,13 +267,17 @@ impl MdbijouApp {
                     }
                 }
             }
-            Cmd::SetTheme(id) => self.switch_theme(&id),
             Cmd::Open => self.open_via_dialog(),
+            Cmd::ToggleSettings => self.show_settings = !self.show_settings,
         }
     }
 
+    /// The traffic-light toolbar: document title, hover-revealed action icons,
+    /// and an edit/preview switch pinned to the top-right.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let muted = self.theme().c.muted;
+        let theme = self.theme().clone();
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
         let title = self
             .doc
             .path
@@ -263,96 +286,393 @@ impl MdbijouApp {
             .unwrap_or_else(|| "untitled".into());
         let dirty = self.doc.dirty;
 
-        ui.horizontal_wrapped(|ui| {
-            // --- Document title + persist state (not color-only) ---
-            let (dot, state) = if dirty {
-                ("●", "未保存")
-            } else {
-                ("○", "已保存")
-            };
-            let title_resp = ui.add(egui::Label::new(
-                RichText::new(format!("{dot} {title} · {state}")).color(if dirty {
-                    Color32::from_rgb(230, 120, 40)
-                } else {
-                    muted
-                }),
-            ));
-            if let Some(p) = &self.doc.path {
-                title_resp.on_hover_text(p.display().to_string());
-            }
-            ui.separator();
+        // The whole bar is draggable (empty areas) so the window can still be
+        // moved now that the native title bar is transparent.
+        let bar_rect = ui.max_rect();
+        let drag_resp = ui.interact(bar_rect, ui.id().with("titlebar_drag"), egui::Sense::drag());
+        if drag_resp.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
 
-            // --- Actions, each with an accessible name + shortcut hint ---
-            if ui
-                .add(egui::Button::new("打开"))
-                .on_hover_text("⌘O")
-                .clicked()
-            {
-                self.dispatch(Cmd::Open);
-            }
-            let view_label = if self.view == View::Preview {
-                "编辑"
-            } else {
-                "预览"
-            };
-            let view_hint = if self.view == View::Preview {
-                "⌘E — 编辑源码"
-            } else {
-                "⌘E — 返回预览"
-            };
-            if ui
-                .add(egui::Button::new(view_label))
-                .on_hover_text(view_hint)
-                .clicked()
-            {
-                self.dispatch(Cmd::ToggleView);
-            }
-            if ui
-                .add(egui::Button::new("保存"))
-                .on_hover_text("⌘S")
-                .clicked()
-            {
-                self.dispatch(Cmd::Save);
-            }
-            if ui
-                .add(egui::Button::new("另存"))
-                .on_hover_text("⇧⌘S")
-                .clicked()
-            {
-                self.dispatch(Cmd::SaveAs);
-            }
-            ui.separator();
+        // Hairline separating the bar from the content below.
+        ui.painter().hline(
+            bar_rect.left()..=bar_rect.right(),
+            bar_rect.bottom() - 0.5,
+            egui::Stroke::new(1.0, theme.c.hr),
+        );
 
-            // --- Theme as a visible menu (UI-MD-012) ---
-            let theme_name = self.theme().name.clone();
-            let current = self.theme_id.clone();
-            let themes: Vec<(String, String)> = self
-                .registry
-                .themes
-                .iter()
-                .map(|t| (t.id.clone(), t.name.clone()))
-                .collect();
-            let mut picked = current.clone();
-            egui::ComboBox::from_id_salt("theme_picker")
-                .selected_text(RichText::new(theme_name).color(muted))
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for (id, name) in &themes {
-                        ui.selectable_value(&mut picked, id.clone(), name.clone());
+        // Open/save icons fade in while the pointer is over the bar; the
+        // settings gear is always visible.
+        let bar_hovered = ui.rect_contains_pointer(bar_rect);
+        let reveal = ui
+            .ctx()
+            .animate_bool(ui.id().with("icon_reveal"), bar_hovered);
+
+        // Action icons optically matched to the traffic-light buttons: 13pt
+        // Phosphor glyphs in 22pt slots, centered on the traffic lights.
+        let light_y = crate::macos::traffic_light_center();
+        let icon_area_w = 3.0 * 22.0 + 2.0 * 4.0;
+        let icon_y = bar_rect.top() + light_y;
+        let mut icon_x = bar_rect.left() + crate::macos::traffic_light_pad() + 2.0;
+        let mut clicked_icon: Option<usize> = None;
+        for (idx, (glyph, tooltip)) in [
+            (regular::FOLDER_OPEN, "打开 (⌘O)"),
+            (regular::FLOPPY_DISK, "保存 (⌘S)"),
+            (regular::GEAR_SIX, "设置 (⌘,)"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // All icons hide until the bar is hovered; the gear stays visible
+            // while the settings page is open as a close affordance.
+            let fade = if idx == 2 && self.show_settings {
+                1.0
+            } else {
+                reveal
+            };
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(icon_x + 11.0, icon_y),
+                egui::vec2(22.0, 22.0),
+            );
+            icon_x += 26.0;
+            if fade <= 0.0 {
+                continue;
+            }
+            let resp = ui.interact(
+                rect,
+                ui.id().with(("toolbar_icon", idx)),
+                egui::Sense::click(),
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().circle_filled(
+                    rect.center(),
+                    11.0,
+                    ui.visuals()
+                        .widgets
+                        .hovered
+                        .weak_bg_fill
+                        .gamma_multiply(fade),
+                );
+            }
+            let base = if idx == 2 && self.show_settings {
+                fg
+            } else {
+                muted
+            };
+            let color = (if resp.hovered() { fg } else { base }).gamma_multiply(fade);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(13.0),
+                color,
+            );
+            if resp.clicked() {
+                clicked_icon = Some(idx);
+            }
+            resp.on_hover_text(tooltip);
+        }
+        match clicked_icon {
+            Some(0) => self.dispatch(Cmd::Open),
+            Some(1) => self.dispatch(Cmd::Save),
+            Some(2) => self.dispatch(Cmd::ToggleSettings),
+            _ => {}
+        }
+
+        // Title / feedback / view switch live in a row vertically centered on
+        // the traffic lights (a bare `horizontal` row would stick to the top).
+        let row_h = 22.0;
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(bar_rect.left(), bar_rect.top() + light_y - row_h / 2.0),
+            egui::vec2(bar_rect.width(), row_h),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+            ui.horizontal(|ui| {
+                // Reserve the icon slot so the title never shifts.
+                ui.add_space(crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 8.0);
+
+                // Reserve room for the unsaved-changes dot so the title never shifts.
+                ui.add_space(12.0);
+                let title_resp = ui.label(RichText::new(&title).size(13.0).color(fg));
+                if dirty {
+                    let dot_center =
+                        egui::pos2(title_resp.rect.left() - 8.0, title_resp.rect.center().y);
+                    ui.painter().circle_filled(dot_center, 3.0, muted);
+                }
+                let state = if dirty { "未保存" } else { "已保存" };
+                match &self.doc.path {
+                    Some(p) => title_resp.on_hover_text(format!("{} · {state}", p.display())),
+                    None => title_resp.on_hover_text(state),
+                };
+
+                if let Some((expiry, msg, color)) = &self.feedback {
+                    if *expiry > Instant::now() {
+                        ui.label(RichText::new(msg).size(12.0).color(*color));
+                    }
+                }
+
+                // Edit/preview segmented switch, pinned to the top-right.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(10.0);
+                    if self.view_switch(ui, &theme) {
+                        self.dispatch(Cmd::ToggleView);
                     }
                 });
-            if picked != current {
-                self.dispatch(Cmd::SetTheme(picked));
-            }
-
-            // --- Save feedback ---
-            if let Some((expiry, msg, color)) = &self.feedback {
-                if *expiry > Instant::now() {
-                    ui.label(RichText::new(msg).color(*color));
-                }
-            }
+            });
         });
     }
+
+    /// Xcode-style segmented control for switching between preview and edit.
+    /// Returns true when the user asked to toggle the view.
+    fn view_switch(&mut self, ui: &mut egui::Ui, theme: &Theme) -> bool {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(92.0, 22.0), egui::Sense::hover());
+        let painter = ui.painter();
+        let rounding = egui::CornerRadius::same(11);
+        painter.rect_filled(rect, rounding, theme.c.code_bg);
+        painter.rect_stroke(
+            rect,
+            rounding,
+            egui::Stroke::new(1.0, theme.c.hr),
+            egui::StrokeKind::Inside,
+        );
+
+        let half = rect.width() / 2.0;
+        let preview_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + half, rect.max.y));
+        let edit_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.min.x + half, rect.min.y), rect.max);
+        let is_preview = self.view == View::Preview;
+        let sel_rect = if is_preview { preview_rect } else { edit_rect };
+        let sel_rounding = egui::CornerRadius::same(9);
+        painter.rect_filled(sel_rect.shrink(2.0), sel_rounding, theme.c.background);
+        painter.rect_stroke(
+            sel_rect.shrink(2.0),
+            sel_rounding,
+            egui::Stroke::new(1.0, theme.c.hr),
+            egui::StrokeKind::Inside,
+        );
+
+        let font = egui::FontId::proportional(12.0);
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
+        let (preview_color, edit_color) = if is_preview { (fg, muted) } else { (muted, fg) };
+        painter.text(
+            preview_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "预览",
+            font.clone(),
+            preview_color,
+        );
+        painter.text(
+            edit_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "编辑",
+            font,
+            edit_color,
+        );
+
+        let preview_resp = ui.interact(
+            preview_rect,
+            ui.id().with("seg_preview"),
+            egui::Sense::click(),
+        );
+        let edit_resp = ui.interact(edit_rect, ui.id().with("seg_edit"), egui::Sense::click());
+        let hovered = preview_resp.hovered() || edit_resp.hovered();
+        if hovered {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            preview_resp.clone().on_hover_text("⌘E");
+        }
+        (preview_resp.clicked() && !is_preview) || (edit_resp.clicked() && is_preview)
+    }
+
+    /// Settings page (opened with ⌘,): a centered modal card over a dimmed
+    /// backdrop. Closed with Esc, the ✕ button, or a click on the backdrop.
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        let fade = ctx.animate_bool(egui::Id::new("settings_fade"), self.show_settings);
+        if fade <= 0.0 {
+            return;
+        }
+        if self.show_settings
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.show_settings = false;
+        }
+
+        let theme = self.theme().clone();
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
+        let themes: Vec<(String, String)> = self
+            .registry
+            .themes
+            .iter()
+            .map(|t| (t.id.clone(), t.name.clone()))
+            .collect();
+        let mut follow = self.cfg.follow_system_theme;
+        let mut picked: Option<String> = None;
+        let mut do_follow = false;
+        let mut do_install = false;
+        let mut close = false;
+
+        // Dimmed backdrop; clicking it closes the settings page.
+        let screen = ctx.input(|i| i.content_rect());
+        let backdrop = egui::Area::new(egui::Id::new("settings_backdrop"))
+            .order(egui::Order::Middle)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter().rect_filled(
+                    screen,
+                    0.0,
+                    Color32::from_black_alpha((90.0 * fade) as u8),
+                );
+                resp
+            });
+        if backdrop.inner.clicked() && self.show_settings {
+            close = true;
+        }
+
+        egui::Area::new(egui::Id::new("settings_card"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_opacity(fade);
+                egui::Frame::new()
+                    .fill(theme.c.background)
+                    .corner_radius(10.0)
+                    .stroke(egui::Stroke::new(1.0, theme.c.hr))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 0,
+                        color: Color32::from_black_alpha(60),
+                    })
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| {
+                        ui.set_width(340.0);
+
+                        // Header: title + close button.
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("设置").size(15.0).strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(regular::X).size(13.0).color(muted),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .on_hover_text("关闭 (Esc)")
+                                        .clicked()
+                                    {
+                                        close = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(16.0);
+                        settings_section(ui, regular::PALETTE, "外观", muted);
+                        ui.add_space(6.0);
+                        if ui.checkbox(&mut follow, "跟随系统主题").changed() {
+                            do_follow = follow;
+                        }
+                        ui.add_space(8.0);
+                        ui.add_enabled_ui(!follow, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                for (id, name) in &themes {
+                                    let selected = self.theme_id == *id;
+                                    let capsule = egui::Button::new(
+                                        RichText::new(name).size(12.0).color(if selected {
+                                            fg
+                                        } else {
+                                            muted
+                                        }),
+                                    )
+                                    .fill(if selected {
+                                        theme.c.code_bg
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        if selected {
+                                            fg.gamma_multiply(0.4)
+                                        } else {
+                                            fg.gamma_multiply(0.15)
+                                        },
+                                    ))
+                                    .corner_radius(6.0);
+                                    if ui.add(capsule).clicked() {
+                                        picked = Some(id.clone());
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.add_space(18.0);
+                        settings_section(ui, regular::TERMINAL, "命令行工具", muted);
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("把 mdbijou 安装为 `mdb` 命令，加入你的 PATH。")
+                                .size(12.0)
+                                .color(muted),
+                        );
+                        ui.add_space(6.0);
+                        if ui.button("安装 CLI 到本地").clicked() {
+                            do_install = true;
+                        }
+                        if let Some(res) = &self.cli_status {
+                            let (mark, color) = if res.ok {
+                                (regular::CHECK_CIRCLE, Color32::from_rgb(70, 170, 90))
+                            } else {
+                                (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
+                            };
+                            ui.label(
+                                RichText::new(format!("{mark}  {}", res.message))
+                                    .size(12.0)
+                                    .color(color),
+                            );
+                        }
+                    });
+            });
+
+        if close {
+            self.show_settings = false;
+        }
+
+        if do_follow {
+            self.cfg.follow_system_theme = follow;
+            if follow {
+                self.apply_follow_system(ctx);
+            }
+            config::save(&self.cfg);
+        }
+        if let Some(id) = picked {
+            self.switch_theme(&id);
+        }
+        if do_install {
+            self.cli_status = Some(install::install_cli());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings card helpers
+// ---------------------------------------------------------------------------
+
+/// Muted 12pt section caption with a Phosphor icon, used inside the settings
+/// card.
+fn settings_section(ui: &mut egui::Ui, icon: &str, text: &str, muted: Color32) {
+    ui.label(
+        RichText::new(format!("{icon}  {text}"))
+            .size(12.0)
+            .strong()
+            .color(muted),
+    );
 }
 
 impl eframe::App for MdbijouApp {
@@ -362,18 +682,16 @@ impl eframe::App for MdbijouApp {
             self.dispatch(Cmd::ToggleView);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            let shift = ctx.input_mut(|i| i.modifiers.shift);
-            if shift {
-                self.dispatch(Cmd::SaveAs);
-            } else {
-                self.dispatch(Cmd::Save);
-            }
+            self.dispatch(Cmd::Save);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
             self.dispatch(Cmd::Reload);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.dispatch(Cmd::Open);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.dispatch(Cmd::ToggleSettings);
         }
 
         // ------- visual theme (egui) derived from our theme -------
@@ -394,10 +712,16 @@ impl eframe::App for MdbijouApp {
         visuals.widgets.hovered.weak_bg_fill = th.c.code_bg;
         ctx.set_visuals(visuals);
 
-        // ------- top bar -------
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            self.top_bar(ui);
-        });
+        // ------- top bar (traffic-light toolbar) -------
+        // Height is twice the measured traffic-light center so the buttons
+        // have equal space above and below.
+        let light_y = crate::macos::traffic_light_center();
+        egui::TopBottomPanel::top("top")
+            .exact_height(2.0 * light_y)
+            .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::ZERO))
+            .show(ctx, |ui| {
+                self.top_bar(ui);
+            });
 
         // ------- central panel: preview or edit -------
         egui::CentralPanel::default()
@@ -413,6 +737,9 @@ impl eframe::App for MdbijouApp {
                     self.show_editor(ui);
                 }
             });
+
+        // ------- settings page -------
+        self.show_settings(ctx);
 
         // ------- unsaved-changes confirm (if a file open is pending) -------
         self.show_open_confirm(ctx);

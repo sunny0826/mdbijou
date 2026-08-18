@@ -51,7 +51,7 @@ themes:
     @echo ""
 
 # ---------- 安装与产物 ----------
-# 安装到 PATH（默认 ~/.local/bin）
+# 安装为 `mdb` 命令到 PATH（默认 ~/.local/bin）
 install target="target/release/mdbijou":
     ./scripts/install.sh {{target}}
 
