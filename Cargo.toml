@@ -1,0 +1,66 @@
+[package]
+name = "mdbijou"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native Markdown reader + simple editor with syntax highlighting"
+license = "MIT"
+
+[[bin]]
+name = "mdbijou"
+path = "src/main.rs"
+
+[features]
+default = ["highlight", "editor", "remote-images"]
+# Shared syntax highlighting engine (syntect), used by preview code blocks and the editor
+highlight = ["dep:syntect"]
+# Simple source editor (edit/preview toggle)
+editor = []
+# Minimal regex-based highlighting fallback (much smaller, lower quality)
+lite-highlight = []
+# Remote (http/https) image download support
+remote-images = ["dep:ureq"]
+
+[dependencies]
+eframe = { version = "0.33", default-features = false, features = [
+    "glow",
+    "persistence",
+    "accesskit",
+] }
+egui = "0.33"
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"
+notify = "8"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+log = "0.4"
+env_logger = "0.11"
+memmap2 = "0.9"
+rfd = "0.15"
+syntect = { version = "5", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.release.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
