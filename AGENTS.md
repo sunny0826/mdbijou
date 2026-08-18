@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`mdbijou` is a Rust 2021 native Markdown reader/editor for macOS. The binary entry point is `src/main.rs`; keep application state and keyboard/file workflows in `src/app.rs`. Parsing belongs in `src/document.rs`, preview rendering in `src/render.rs`, editing and syntax highlighting in `src/editor.rs` and `src/highlight.rs`, and reusable theme, configuration, and font behavior in their matching modules. Shell helpers are in `scripts/`, while `sample.md` is the local smoke-test fixture. Generated output stays under `target/` and must not be committed. The `docs/` directory is local-only scratch space: it is ignored by git and must not be used as a source of reference or authority for code, behavior, or decisions.
+`mdbijou` is a Rust 2021 native Markdown reader/editor for macOS. The binary entry point is `src/main.rs`; keep application state and keyboard/file workflows in `src/app.rs`. Parsing belongs in `src/document.rs`, preview rendering in `src/render.rs`, editing and syntax highlighting in `src/editor.rs` and `src/highlight.rs`, image loading/caching in `src/images.rs`, and reusable theme, configuration, and font behavior in their matching modules. Shell helpers are in `scripts/`, while `sample.md` is the local smoke-test fixture. Generated output stays under `target/` and must not be committed. The `docs/` directory is local-only scratch space: it is ignored by git and must not be used as a source of reference or authority for code, behavior, or decisions.
 
 ## Build, Test, and Development Commands
 
@@ -24,7 +24,7 @@ Follow standard `rustfmt` output (four-space indentation). Use `snake_case` for 
 
 ## Testing Guidelines
 
-The repository currently has no committed automated tests. Add unit tests beside the implementation in `#[cfg(test)] mod tests`; add integration tests under `tests/` when behavior crosses module or CLI boundaries. Name tests by observable behavior, for example `preserves_task_list_state`. Before submitting, run `cargo test`, `just clippy`, `just check`, and manually open `sample.md`. Changes affecting release size or startup should also run `just baseline` and note the result.
+Unit tests live beside the implementation in `#[cfg(test)] mod tests` (for example the parser tests in `src/document.rs` and the image resolution tests in `src/images.rs`), and `cargo test` currently passes. Add integration tests under `tests/` when behavior crosses module or CLI boundaries. Name tests by observable behavior, for example `preserves_task_list_state`. Before submitting, run `cargo test`, `just clippy`, `just check`, and manually open `sample.md`. Changes affecting release size or startup should also run `just baseline` and note the result.
 
 ## Commit & Pull Request Guidelines
 

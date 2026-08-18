@@ -24,6 +24,9 @@ pub type Line = Vec<Span>;
 pub trait Highlighter {
     /// Highlight a single line of a fenced code block in `lang` (or plain if None).
     fn code_line(&mut self, lang: Option<&str>, line: &str) -> Line;
+    /// Highlight an entire code block in `lang`, keeping cross-line syntax state
+    /// (multi-line strings, block comments) consistent (UI-MD-008).
+    fn code_block(&mut self, lang: Option<&str>, text: &str) -> Vec<Line>;
     /// Highlight a single line in Markdown context (editor full text).
     fn markdown_line(&mut self, line: &str) -> Line;
 }
@@ -41,7 +44,9 @@ pub struct LiteHighlighter {
 #[cfg(not(feature = "highlight"))]
 impl LiteHighlighter {
     pub fn new(theme: &Theme) -> Self {
-        Self { syntax: theme.syntax.clone() }
+        Self {
+            syntax: theme.syntax.clone(),
+        }
     }
 }
 
@@ -53,11 +58,19 @@ impl Highlighter for LiteHighlighter {
         let mut rest = line;
         while !rest.is_empty() {
             let (tok, color, adv) = next_code_token(rest, &self.syntax);
-            out.push(Span { text: tok.clone(), color: color, style: 0 });
+            out.push(Span {
+                text: tok.clone(),
+                color: color,
+                style: 0,
+            });
             let adv = adv.min(rest.len());
             rest = &rest[adv..];
         }
         out
+    }
+
+    fn code_block(&mut self, lang: Option<&str>, text: &str) -> Vec<Line> {
+        text.lines().map(|l| self.code_line(lang, l)).collect()
     }
 
     fn markdown_line(&mut self, line: &str) -> Line {
@@ -105,10 +118,18 @@ fn next_code_token(s: &str, sy: &crate::theme::SyntaxColors) -> (String, Color32
 fn markdown_line_highlight(line: &str, sy: &crate::theme::SyntaxColors) -> Line {
     let mut out: Line = Vec::new();
     let hash_count = line.chars().take_while(|c| *c == '#').count();
-    if hash_count >= 1 && hash_count <= 6 {
+    if (1..=6).contains(&hash_count) {
         let trimmed = line.trim_start_matches('#').trim_start();
-        out.push(Span { text: "#".repeat(hash_count) + " ", color: sy.markup_heading, style: 1 });
-        out.push(Span { text: trimmed.to_string(), color: sy.markup_heading, style: 1 });
+        out.push(Span {
+            text: "#".repeat(hash_count) + " ",
+            color: sy.markup_heading,
+            style: 1,
+        });
+        out.push(Span {
+            text: trimmed.to_string(),
+            color: sy.markup_heading,
+            style: 1,
+        });
         return out;
     }
     let mut rest = line;
@@ -117,13 +138,25 @@ fn markdown_line_highlight(line: &str, sy: &crate::theme::SyntaxColors) -> Line 
             let after = &rest[start + 1..];
             if let Some(end_rel) = after.find('`') {
                 let code_span = &rest[start..start + 1 + end_rel + 1];
-                out.push(Span { text: rest[..start].to_string(), color: Color32::TRANSPARENT, style: 0 });
-                out.push(Span { text: code_span.to_string(), color: sy.markup_code, style: 0 });
+                out.push(Span {
+                    text: rest[..start].to_string(),
+                    color: Color32::TRANSPARENT,
+                    style: 0,
+                });
+                out.push(Span {
+                    text: code_span.to_string(),
+                    color: sy.markup_code,
+                    style: 0,
+                });
                 rest = &rest[start + code_span.len()..];
                 continue;
             }
         }
-        out.push(Span { text: rest.to_string(), color: Color32::TRANSPARENT, style: 0 });
+        out.push(Span {
+            text: rest.to_string(),
+            color: Color32::TRANSPARENT,
+            style: 0,
+        });
         rest = "";
     }
     out
@@ -150,7 +183,11 @@ impl SyntectHighlighter {
             crate::theme::ThemeKind::Dark => "base16-ocean.dark",
         };
         let th = ts.themes.get(name).unwrap().clone();
-        Self { ss, theme: th, markdown: theme.syntax.clone() }
+        Self {
+            ss,
+            theme: th,
+            markdown: theme.syntax.clone(),
+        }
     }
 
     fn highlight_block(&self, lang: Option<&str>, text: &str) -> Vec<Line> {
@@ -167,7 +204,11 @@ impl SyntectHighlighter {
                     if text.is_empty() {
                         return None;
                     }
-                    Some(Span { text: text.to_string(), color: syntect_color(style.foreground), style: 0 })
+                    Some(Span {
+                        text: text.to_string(),
+                        color: syntect_color(style.foreground),
+                        style: 0,
+                    })
                 })
                 .collect();
             lines.push(spans);
@@ -184,8 +225,14 @@ fn syntect_color(c: syntect::highlighting::Color) -> Color32 {
 #[cfg(feature = "highlight")]
 impl Highlighter for SyntectHighlighter {
     fn code_line(&mut self, lang: Option<&str>, line: &str) -> Line {
-        // Line-oriented API used by the editor for fenced code.
-        self.highlight_block(lang, line).into_iter().next().unwrap_or_default()
+        self.highlight_block(lang, line)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    fn code_block(&mut self, lang: Option<&str>, text: &str) -> Vec<Line> {
+        self.highlight_block(lang, text)
     }
 
     fn markdown_line(&mut self, line: &str) -> Line {
@@ -207,4 +254,3 @@ pub fn new_highlighter(theme: &Theme) -> Box<dyn Highlighter> {
         Box::new(LiteHighlighter::new(theme))
     }
 }
-
