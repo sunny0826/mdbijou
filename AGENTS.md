@@ -14,6 +14,8 @@ Rust 1.85+ and `just` are the expected tools.
 - `just fmt` formats Rust sources with `rustfmt`.
 - `cargo test` runs the test suite.
 - `just release` creates the size-optimized binary at `target/release/mdbijou`.
+- `just icon` regenerates the macOS-style squircle master `assets/mdbijou-icon-1024.png` (`scripts/icon-compose.py`, needs Pillow) and `assets/mdbijou.icns` from `logo.png` (sips + iconutil).
+- `just bundle` packages `dist/mdbijou.app` (release binary + icon + Info.plist + ad-hoc codesign); `just dmg` also produces a `.dmg` in `dist/`.
 - `just baseline` records release size and startup sanity results.
 
 Use `just edit path/to/file.md` to exercise editing and `just preview path/to/file.md` to inspect rendering.
@@ -21,6 +23,14 @@ Use `just edit path/to/file.md` to exercise editing and `just preview path/to/fi
 ## Coding Style & Naming Conventions
 
 Follow standard `rustfmt` output (four-space indentation). Use `snake_case` for modules, functions, and variables; `PascalCase` for structs and enums; and `SCREAMING_SNAKE_CASE` for constants. Keep feature-dependent behavior behind the existing Cargo features (`highlight`, `editor`, `lite-highlight`, and `remote-images`). Prefer small, focused modules and propagate recoverable errors instead of panicking in file, configuration, or rendering paths.
+
+## egui Text Vertical Positioning
+
+In egui, a rect/galley's geometric center is NOT the glyphs' optical center: galley bounds come from font metrics (ascent/descent, `line_height`), and the default valign is `Align::BOTTOM`. With CJK fallback fonts in the stack (PingFang's ascent ≈ 1.16em) the box extends far beyond the visible ink, so `painter.text(rect.center(), Align2::CENTER_CENTER, …)` renders text visibly too high, and `TextFormat.strikethrough` (drawn at the glyph *logical* box center) lands below the visual middle. Therefore:
+
+- When vertically centering text in a rect, correct by the ink bounds (`placed.row.visuals.mesh_bounds`), as `paint_optical_centered_text` in `src/app.rs` does.
+- Never use `TextFormat.strikethrough`; record spans and draw the line at the row's ink center, as `paint_job`/`StrikeSpan` in `src/render.rs` do.
+- After touching such code, eyeball the result at several font sizes — metrics shift with the font family/size chosen in settings.
 
 ## Testing Guidelines
 
