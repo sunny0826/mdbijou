@@ -14,12 +14,13 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| 打开/渲染 Markdown | `mdbijou file.md` |
-| 简单编辑器 | `Cmd+E` 切换编辑/预览，`Cmd+S` 保存、`Cmd+Shift+S` 另存 |
+| 打开/渲染 Markdown | `mdbijou file.md`（安装为 CLI 后：`mdb file.md`） |
+| 简单编辑器 | `Cmd+E` 切换编辑/预览，`Cmd+S` 保存 |
 | 语法高亮 | Markdown 全文 + 内嵌代码块（`syntect`，可裁剪） |
-| 主题切换 | 顶栏「主题」下拉菜单 / `--theme <id>`（手动选择后优先于跟随系统） |
-| 快捷键 | `Cmd+O` 打开、`Cmd+R` 重载、`Cmd+Z` 撤销等 |
+| 主题切换 | 设置页（`Cmd+,`）选择主题，或 `--theme <id>`（手动选择后优先于跟随系统） |
+| 快捷键 | `Cmd+O` 打开、`Cmd+R` 重载、`Cmd+,` 设置、`Cmd+Z` 撤销等 |
 | 未保存保护 | 打开新文件前弹「保存/放弃/取消」确认 |
+| 安装 CLI | 设置页一键安装 `mdb` 命令到本地 PATH |
 
 ## 依赖与体积
 
@@ -49,7 +50,7 @@ just check                 # 快速类型检查
 just preview file.md       # 阅读预览视图
 just edit file.md          # 直接进编辑器（带高亮）
 just run-release file.md   # 直接跑 release 产物
-just install               # 安装到 PATH
+just install               # 安装为 `mdb` 到 PATH
 just themes                # 列出主题
 just size                  # 查看二进制体积
 just baseline              # 体积 / 启动基线
@@ -82,9 +83,9 @@ just --list-themes         # 查看全部主题
 | 快捷键 | 功能 |
 | --- | --- |
 | `Cmd+E` | 编辑 / 预览 切换 |
-| `Cmd+S` / `Cmd+Shift+S` | 保存 / 另存 |
+| `Cmd+S` | 保存 |
 | `Cmd+O` | 打开文件 |
-| `Cmd+T` | 循环切换主题 |
+| `Cmd+,` | 打开设置页 |
 | `Cmd+R` | 重新加载 |
 | `Cmd+Z` / `Cmd+Shift+Z` | 撤销 / 重做 |
 
@@ -95,7 +96,9 @@ just --list-themes         # 查看全部主题
 ```
 src/
   main.rs        CLI 入口（--edit / --theme / --list-themes）
-  app.rs         应用外壳（视图状态机 / 快捷键 / 保存 / 打开确认）
+  app.rs         应用外壳（视图状态机 / 顶栏 / 设置页 / 快捷键 / 保存）
+  macos.rs       macOS 原生窗口标题栏（红绿灯顶栏整合）
+  install.rs     将当前程序安装为 `mdb` CLI
   document.rs    pulldown-cmark → IR
   render.rs      预览渲染
   editor.rs      简单编辑器（TextEdit + 逐行高亮 layouter）
@@ -105,7 +108,7 @@ src/
   fonts.rs       CJK 字体加载
   images.rs      图片加载与缓存（本地 + 远程）
 scripts/
-  install.sh     安装脚本
+  install.sh     安装脚本（安装为 `mdb`）
   bench.sh       体积 / 启动基线
 justfile         命令编排
 docs/            设计文档（DESIGN.md / TASKS.md）

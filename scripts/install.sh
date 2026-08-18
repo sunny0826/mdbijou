@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# mdbijou installer — copies the release binary to ~/.local/bin (or /usr/local/bin).
+# mdbijou installer — copies the release binary to ~/.local/bin (or /usr/local/bin)
+# as the `mdb` CLI.
 set -euo pipefail
 
 BIN="${1:-target/release/mdbijou}"
@@ -18,7 +19,7 @@ done
 TARGET="${TARGET:-$HOME/.local/bin}"
 
 mkdir -p "$TARGET"
-cp "$BIN" "$TARGET/mdbijou"
-chmod +x "$TARGET/mdbijou"
-echo "installed mdbijou -> $TARGET/mdbijou"
-echo "ensure '$TARGET' is on your PATH, then run:  mdbijou path/to/file.md"
+cp "$BIN" "$TARGET/mdb"
+chmod +x "$TARGET/mdb"
+echo "installed mdb -> $TARGET/mdb"
+echo "ensure '$TARGET' is on your PATH, then run:  mdb path/to/file.md"

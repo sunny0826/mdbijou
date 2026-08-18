@@ -16,6 +16,8 @@ mod editor;
 mod fonts;
 mod highlight;
 mod images;
+mod install;
+mod macos;
 mod render;
 mod theme;
 
