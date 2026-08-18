@@ -13,3 +13,6 @@
 
 # Local-only design notes (not a reference, not committed)
 /docs/
+
+# Packaging output
+/dist/
