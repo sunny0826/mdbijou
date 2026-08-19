@@ -1,14 +1,14 @@
-# mdbijou baseline (M0 · T-006)
-Date: 2026-08-18
+# mdbijou baseline (v0.0.1)
+Date: 2026-08-19
 Host: macOS (Apple Silicon)
 
 ## Release binary
-- Size: 5.3 MB (5,565,056 bytes)  — target ≤10 MB (ideal <5 MB) ✅
+- Size: 7.2 MB (7,536,304 bytes)  — target ≤10 MB (ideal <5 MB) ✅
 - Profile: opt-level="z", lto="fat", codegen-units=1, panic="abort", strip="symbols"
 
 ## Startup
-- Method: spawn `mdbijou sample.md`, poll first-alive (5ms tick), 3 runs
-- Result: alive on first poll in all runs → ~instant, <150 ms target ✅
+- Method: spawn `mdbijou sample.md`, poll first-alive (2ms tick), 5 runs
+- Result: 16–22 ms spawn-to-first-alive (avg ~18 ms), <150 ms target ✅
 - (hyperfine not installed; /usr/bin/time measures until window-close, so a
    spawn-to-first-alive proxy is used instead.)
 
