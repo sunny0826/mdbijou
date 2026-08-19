@@ -36,6 +36,8 @@ pub struct MdbijouApp {
     show_settings: bool,
     /// Result of the last CLI-install attempt, shown in the settings page.
     cli_status: Option<install::InstallResult>,
+    /// File paths sent by the OS (Finder double-click, `open`, Dock drop).
+    open_rx: std::sync::mpsc::Receiver<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -48,7 +50,12 @@ enum Cmd {
 }
 
 impl MdbijouApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, mut cfg: Config, path: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        mut cfg: Config,
+        path: Option<PathBuf>,
+        open_rx: std::sync::mpsc::Receiver<PathBuf>,
+    ) -> Self {
         crate::macos::configure_title_bar(cc);
 
         let text = path
@@ -79,11 +86,9 @@ impl MdbijouApp {
         let hl = highlight::new_highlighter(&theme);
         let images = ImageStore::new(base_dir_for(&doc));
 
-        // Install CJK fonts and the Phosphor icon font.
-        let mut fonts = egui::FontDefinitions::default();
-        crate::fonts::install_cjk_fonts(&mut fonts);
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        cc.egui_ctx.set_fonts(fonts);
+        // Install the chosen body font, the CJK fallback and the icon font.
+        cc.egui_ctx
+            .set_fonts(crate::fonts::build_fonts(&cfg.font_family));
 
         let view = cfg.default_view;
 
@@ -101,6 +106,7 @@ impl MdbijouApp {
             feedback: None,
             show_settings: false,
             cli_status: None,
+            open_rx,
         }
     }
 
@@ -380,46 +386,66 @@ impl MdbijouApp {
             _ => {}
         }
 
-        // Title / feedback / view switch live in a row vertically centered on
-        // the traffic lights (a bare `horizontal` row would stick to the top).
-        let row_h = 22.0;
-        let row_rect = egui::Rect::from_min_size(
-            egui::pos2(bar_rect.left(), bar_rect.top() + light_y - row_h / 2.0),
-            egui::vec2(bar_rect.width(), row_h),
+        // Title / feedback / view switch. All three are painted/allocated
+        // directly against the bar's geometric center: egui row layout aligns
+        // children by content height (and galleys carry ascender/descender
+        // padding), which left the text sitting visibly high in the bar.
+        let center_y = bar_rect.center().y;
+        let title_galley =
+            ui.fonts_mut(|f| f.layout_no_wrap(title.clone(), egui::FontId::proportional(13.0), fg));
+        let title_w = title_galley.size().x;
+        let feedback = match &self.feedback {
+            Some((expiry, msg, color)) if *expiry > Instant::now() => Some((
+                ui.fonts_mut(|f| {
+                    f.layout_no_wrap(msg.clone(), egui::FontId::proportional(12.0), *color)
+                }),
+                *color,
+            )),
+            _ => None,
+        };
+        let feedback_w = feedback
+            .as_ref()
+            .map(|(g, _)| g.size().x + 8.0)
+            .unwrap_or(0.0);
+
+        // Center the (dot slot + title + feedback) group horizontally.
+        let total_w = 12.0 + title_w + feedback_w;
+        let min_left = crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 8.0;
+        let start_x =
+            (bar_rect.left() + (bar_rect.width() - total_w) / 2.0).max(bar_rect.left() + min_left);
+
+        let title_min_x = start_x + 12.0; // dot slot
+        let title_center = egui::pos2(title_min_x + title_w / 2.0, center_y);
+        let title_rect =
+            egui::Rect::from_center_size(title_center, egui::vec2(title_w, title_galley.size().y));
+        if dirty {
+            ui.painter()
+                .circle_filled(egui::pos2(title_min_x - 5.0, center_y), 3.0, muted);
+        }
+        let title_resp = ui.interact(title_rect, ui.id().with("bar_title"), egui::Sense::hover());
+        ui.painter()
+            .galley(title_center - title_galley.size() / 2.0, title_galley, fg);
+        let state = if dirty { "未保存" } else { "已保存" };
+        match &self.doc.path {
+            Some(p) => title_resp.on_hover_text(format!("{} · {state}", p.display())),
+            None => title_resp.on_hover_text(state),
+        };
+
+        if let Some((g, color)) = feedback {
+            let pos =
+                egui::pos2(title_rect.max.x + 8.0, center_y) - egui::vec2(0.0, g.size().y / 2.0);
+            ui.painter().galley(pos, g, color);
+        }
+
+        // Edit/preview segmented switch, pinned to the top-right.
+        let switch_rect = egui::Rect::from_center_size(
+            egui::pos2(bar_rect.right() - 10.0 - 46.0, center_y),
+            egui::vec2(92.0, 22.0),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
-            ui.horizontal(|ui| {
-                // Reserve the icon slot so the title never shifts.
-                ui.add_space(crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 8.0);
-
-                // Reserve room for the unsaved-changes dot so the title never shifts.
-                ui.add_space(12.0);
-                let title_resp = ui.label(RichText::new(&title).size(13.0).color(fg));
-                if dirty {
-                    let dot_center =
-                        egui::pos2(title_resp.rect.left() - 8.0, title_resp.rect.center().y);
-                    ui.painter().circle_filled(dot_center, 3.0, muted);
-                }
-                let state = if dirty { "未保存" } else { "已保存" };
-                match &self.doc.path {
-                    Some(p) => title_resp.on_hover_text(format!("{} · {state}", p.display())),
-                    None => title_resp.on_hover_text(state),
-                };
-
-                if let Some((expiry, msg, color)) = &self.feedback {
-                    if *expiry > Instant::now() {
-                        ui.label(RichText::new(msg).size(12.0).color(*color));
-                    }
-                }
-
-                // Edit/preview segmented switch, pinned to the top-right.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(10.0);
-                    if self.view_switch(ui, &theme) {
-                        self.dispatch(Cmd::ToggleView);
-                    }
-                });
-            });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(switch_rect), |ui| {
+            if self.view_switch(ui, &theme) {
+                self.dispatch(Cmd::ToggleView);
+            }
         });
     }
 
@@ -457,20 +483,8 @@ impl MdbijouApp {
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
         let (preview_color, edit_color) = if is_preview { (fg, muted) } else { (muted, fg) };
-        painter.text(
-            preview_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "预览",
-            font.clone(),
-            preview_color,
-        );
-        painter.text(
-            edit_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "编辑",
-            font,
-            edit_color,
-        );
+        paint_optical_centered_text(painter, preview_rect, "预览", font.clone(), preview_color);
+        paint_optical_centered_text(painter, edit_rect, "编辑", font, edit_color);
 
         let preview_resp = ui.interact(
             preview_rect,
@@ -502,16 +516,20 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
-        let themes: Vec<(String, String)> = self
+        let accent = theme.c.link;
+        let themes: Vec<(String, String, Color32)> = self
             .registry
             .themes
             .iter()
-            .map(|t| (t.id.clone(), t.name.clone()))
+            .map(|t| (t.id.clone(), t.name.clone(), t.c.link))
             .collect();
         let mut follow = self.cfg.follow_system_theme;
         let mut picked: Option<String> = None;
         let mut do_follow = false;
         let mut do_install = false;
+        let mut font_picked: Option<String> = None;
+        let mut font_size_changed = false;
+        let mut editor_size_changed = false;
         let mut close = false;
 
         // Dimmed backdrop; clicking it closes the settings page.
@@ -539,7 +557,7 @@ impl MdbijouApp {
                 ui.set_opacity(fade);
                 egui::Frame::new()
                     .fill(theme.c.background)
-                    .corner_radius(10.0)
+                    .corner_radius(14.0)
                     .stroke(egui::Stroke::new(1.0, theme.c.hr))
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 8],
@@ -547,12 +565,13 @@ impl MdbijouApp {
                         spread: 0,
                         color: Color32::from_black_alpha(60),
                     })
-                    .inner_margin(egui::Margin::same(20))
+                    .inner_margin(egui::Margin::same(22))
                     .show(ui, |ui| {
-                        ui.set_width(340.0);
+                        ui.set_width(400.0);
 
-                        // Header: title + close button.
+                        // Header: icon + title + close button.
                         ui.horizontal(|ui| {
+                            ui.label(RichText::new(regular::GEAR_SIX).size(15.0).color(muted));
                             ui.label(RichText::new("设置").size(15.0).strong());
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -573,70 +592,183 @@ impl MdbijouApp {
                             );
                         });
 
-                        ui.add_space(16.0);
+                        ui.add_space(18.0);
                         settings_section(ui, regular::PALETTE, "外观", muted);
                         ui.add_space(6.0);
-                        if ui.checkbox(&mut follow, "跟随系统主题").changed() {
-                            do_follow = follow;
-                        }
-                        ui.add_space(8.0);
-                        ui.add_enabled_ui(!follow, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                                for (id, name) in &themes {
-                                    let selected = self.theme_id == *id;
-                                    let capsule = egui::Button::new(
-                                        RichText::new(name).size(12.0).color(if selected {
-                                            fg
-                                        } else {
-                                            muted
-                                        }),
-                                    )
-                                    .fill(if selected {
-                                        theme.c.code_bg
-                                    } else {
-                                        Color32::TRANSPARENT
-                                    })
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        if selected {
-                                            fg.gamma_multiply(0.4)
-                                        } else {
-                                            fg.gamma_multiply(0.15)
-                                        },
-                                    ))
-                                    .corner_radius(6.0);
-                                    if ui.add(capsule).clicked() {
-                                        picked = Some(id.clone());
-                                    }
+                        settings_group(ui, &theme, |ui| {
+                            ui.add_space(8.0);
+                            settings_row(ui, "跟随系统主题", fg, |ui| {
+                                let mut f = follow;
+                                if toggle_switch(ui, &mut f, accent, muted) {
+                                    follow = f;
+                                    do_follow = true;
                                 }
                             });
+                            ui.add_space(6.0);
+                            ui.add_enabled_ui(!follow, |ui| {
+                                hairline(ui, theme.c.hr);
+                                ui.add_space(8.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for (id, name, chip_accent) in &themes {
+                                        let selected = self.theme_id == *id;
+                                        let mut job = egui::text::LayoutJob::default();
+                                        job.append(
+                                            "●  ",
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::proportional(10.0),
+                                                color: *chip_accent,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        job.append(
+                                            name,
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::proportional(12.0),
+                                                color: if selected { fg } else { muted },
+                                                ..Default::default()
+                                            },
+                                        );
+                                        let capsule = egui::Button::new(job)
+                                            .fill(if selected {
+                                                chip_accent.gamma_multiply(0.15)
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            })
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                if selected {
+                                                    chip_accent.gamma_multiply(0.6)
+                                                } else {
+                                                    fg.gamma_multiply(0.15)
+                                                },
+                                            ))
+                                            .corner_radius(10.0);
+                                        if ui.add(capsule).clicked() {
+                                            picked = Some(id.clone());
+                                        }
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            });
+                            ui.add_space(2.0);
                         });
 
-                        ui.add_space(18.0);
+                        ui.add_space(16.0);
+                        settings_section(ui, regular::TEXT_AA, "字体", muted);
+                        ui.add_space(6.0);
+                        settings_group(ui, &theme, |ui| {
+                            ui.add_space(8.0);
+                            settings_row(ui, "正文字体", fg, |ui| {
+                                let current = crate::fonts::BODY_FONTS
+                                    .iter()
+                                    .find(|f| f.id == self.cfg.font_family)
+                                    .map(|f| f.name)
+                                    .unwrap_or("默认");
+                                egui::ComboBox::from_id_salt("body_font")
+                                    .width(170.0)
+                                    .selected_text(RichText::new(current).size(12.0))
+                                    .show_ui(ui, |ui| {
+                                        for f in crate::fonts::BODY_FONTS {
+                                            if ui
+                                                .selectable_label(
+                                                    self.cfg.font_family == f.id,
+                                                    RichText::new(f.name).size(12.0),
+                                                )
+                                                .clicked()
+                                            {
+                                                font_picked = Some(f.id.to_string());
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.add_space(6.0);
+                            hairline(ui, theme.c.hr);
+                            ui.add_space(8.0);
+                            settings_row(ui, "正文字号", fg, |ui| {
+                                ui.label(
+                                    RichText::new(format!("{:.1}", self.cfg.font_size))
+                                        .size(12.0)
+                                        .color(muted),
+                                );
+                                let w = (ui.available_width() - 8.0).max(60.0);
+                                if ui
+                                    .add_sized(
+                                        [w, 18.0],
+                                        egui::Slider::new(&mut self.cfg.font_size, 12.0..=24.0)
+                                            .step_by(0.5)
+                                            .show_value(false),
+                                    )
+                                    .changed()
+                                {
+                                    font_size_changed = true;
+                                }
+                            });
+                            ui.add_space(6.0);
+                            hairline(ui, theme.c.hr);
+                            ui.add_space(8.0);
+                            settings_row(ui, "编辑器字号", fg, |ui| {
+                                ui.label(
+                                    RichText::new(format!("{:.1}", self.cfg.editor_font_size))
+                                        .size(12.0)
+                                        .color(muted),
+                                );
+                                let w = (ui.available_width() - 8.0).max(60.0);
+                                if ui
+                                    .add_sized(
+                                        [w, 18.0],
+                                        egui::Slider::new(
+                                            &mut self.cfg.editor_font_size,
+                                            11.0..=22.0,
+                                        )
+                                        .step_by(0.5)
+                                        .show_value(false),
+                                    )
+                                    .changed()
+                                {
+                                    editor_size_changed = true;
+                                }
+                            });
+                            ui.add_space(8.0);
+                        });
+
+                        ui.add_space(16.0);
                         settings_section(ui, regular::TERMINAL, "命令行工具", muted);
                         ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("把 mdbijou 安装为 `mdb` 命令，加入你的 PATH。")
-                                .size(12.0)
-                                .color(muted),
-                        );
-                        ui.add_space(6.0);
-                        if ui.button("安装 CLI 到本地").clicked() {
-                            do_install = true;
-                        }
-                        if let Some(res) = &self.cli_status {
-                            let (mark, color) = if res.ok {
-                                (regular::CHECK_CIRCLE, Color32::from_rgb(70, 170, 90))
-                            } else {
-                                (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
-                            };
+                        settings_group(ui, &theme, |ui| {
+                            ui.add_space(8.0);
                             ui.label(
-                                RichText::new(format!("{mark}  {}", res.message))
+                                RichText::new("把 mdbijou 安装为 `mdb` 命令，加入你的 PATH。")
                                     .size(12.0)
-                                    .color(color),
+                                    .color(muted),
                             );
-                        }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if let Some(res) = &self.cli_status {
+                                    let (mark, color) = if res.ok {
+                                        (regular::CHECK_CIRCLE, Color32::from_rgb(70, 170, 90))
+                                    } else {
+                                        (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
+                                    };
+                                    ui.label(
+                                        RichText::new(format!("{mark}  {}", res.message))
+                                            .size(12.0)
+                                            .color(color),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("安装 CLI 到本地").clicked() {
+                                            do_install = true;
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(8.0);
+                        });
                     });
             });
 
@@ -654,6 +786,14 @@ impl MdbijouApp {
         if let Some(id) = picked {
             self.switch_theme(&id);
         }
+        if let Some(id) = font_picked {
+            self.cfg.font_family = id;
+            ctx.set_fonts(crate::fonts::build_fonts(&self.cfg.font_family));
+            config::save(&self.cfg);
+        }
+        if font_size_changed || editor_size_changed {
+            config::save(&self.cfg);
+        }
         if do_install {
             self.cli_status = Some(install::install_cli());
         }
@@ -663,6 +803,31 @@ impl MdbijouApp {
 // ---------------------------------------------------------------------------
 // Settings card helpers
 // ---------------------------------------------------------------------------
+
+/// Paint `text` centered inside `rect` by the glyphs' *ink* bounds rather than
+/// the galley's geometric box. The galley box is derived from font metrics
+/// (ascent/descent of the whole font set), so with CJK fallback fonts in the
+/// stack the box extends well above the visible glyphs and naive
+/// `Align2::CENTER_CENTER` placement renders the text too high.
+fn paint_optical_centered_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+) {
+    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
+    let mut shift = egui::Vec2::ZERO;
+    if let Some(placed) = galley.rows.first() {
+        let ink = placed.row.visuals.mesh_bounds;
+        if ink.is_finite() && ink.width() > 0.0 && ink.height() > 0.0 {
+            let ink_center = placed.pos + ink.center().to_vec2();
+            shift = galley.rect.center() - ink_center;
+        }
+    }
+    let pos = rect.center() - galley.size() / 2.0 + shift;
+    painter.galley(pos, galley, color);
+}
 
 /// Muted 12pt section caption with a Phosphor icon, used inside the settings
 /// card.
@@ -675,8 +840,76 @@ fn settings_section(ui: &mut egui::Ui, icon: &str, text: &str, muted: Color32) {
     );
 }
 
+/// Grouped-panel container (macOS System Settings style): a rounded, subtly
+/// filled box holding one settings section's rows.
+fn settings_group(ui: &mut egui::Ui, theme: &Theme, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(theme.c.code_bg)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(12, 2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+}
+
+/// One settings row: label on the left, controls right-aligned.
+fn settings_row(ui: &mut egui::Ui, label: &str, fg: Color32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(13.0).color(fg));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+    });
+}
+
+/// Full-width 1px separator used between rows inside a settings group.
+fn hairline(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, color),
+    );
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let a = egui::ecolor::Rgba::from(a);
+    let b = egui::ecolor::Rgba::from(b);
+    Color32::from(a * (1.0 - t) + b * t)
+}
+
+/// macOS-style pill toggle switch. Returns true when the value was toggled.
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, accent: Color32, muted: Color32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(36.0, 20.0), egui::Sense::click());
+    let changed = resp.clicked();
+    if changed {
+        *on = !*on;
+    }
+    let t = ui.ctx().animate_bool(resp.id, *on);
+    let pill = rect.shrink(1.0);
+    let bg = lerp_color(muted.gamma_multiply(0.30), accent, t);
+    ui.painter()
+        .rect_filled(pill, egui::CornerRadius::same(10), bg);
+    let r = 7.5;
+    let travel = pill.width() - 6.0 - 2.0 * r;
+    let x = pill.left() + 3.0 + r + travel * t;
+    ui.painter()
+        .circle_filled(egui::pos2(x, pill.center().y), r, Color32::WHITE);
+    changed
+}
+
 impl eframe::App for MdbijouApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ------- files sent by the OS (Finder double-click / `open` / Dock) ---
+        let mut got_open = false;
+        while let Ok(path) = self.open_rx.try_recv() {
+            self.request_open(path);
+            got_open = true;
+        }
+        if got_open {
+            ctx.request_repaint();
+        }
+
         // ------- keyboard shortcuts -------
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
             self.dispatch(Cmd::ToggleView);
@@ -775,9 +1008,23 @@ impl MdbijouApp {
             self.cfg.line_height,
         );
 
+        // Vertically center the document when it is shorter than the
+        // viewport; taller documents stay top-aligned and scrollable. The
+        // content height is measured during rendering and stored for the next
+        // frame (one frame of lag, then stable).
+        let viewport_h = ui.available_height();
+        let content_h_id = ui.id().with("preview_content_h");
+        let stored_h = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<f32>(content_h_id))
+            .unwrap_or(0.0);
+        let top_pad = ((viewport_h - stored_h) / 2.0).max(0.0);
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.add_space(top_pad);
+                let content_top = ui.cursor().min.y;
                 ui.horizontal(|ui| {
                     ui.add_space(pad);
                     ui.vertical(|ui| {
@@ -785,6 +1032,9 @@ impl MdbijouApp {
                         crate::render::render_document(ui, &self.doc, &mut rctx);
                     });
                 });
+                let measured = ui.cursor().min.y - content_top;
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(content_h_id, measured.max(0.0)));
             });
     }
 

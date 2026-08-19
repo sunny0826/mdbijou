@@ -48,14 +48,17 @@ impl<'a> RenderCtx<'a> {
     }
 
     fn heading_size(&self, level: u8) -> f32 {
-        match level {
+        // Scale headings with the configured body size (16pt baseline).
+        let k = self.font_size / 16.0;
+        let base = match level {
             1 => 28.0,
             2 => 23.0,
             3 => 20.0,
             4 => 17.5,
             5 => 16.0,
             _ => 15.0,
-        }
+        };
+        base * k
     }
 
     fn line_h(&self, size: f32) -> f32 {
@@ -79,9 +82,10 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
         Block::Heading { level, inlines } => {
             let size = ctx.heading_size(*level);
             let color = ctx.theme.c.heading;
-            let (job, links) = build_inline_job(inlines, ctx, color, FontId::proportional(size));
+            let (job, links, strikes) =
+                build_inline_job(inlines, ctx, color, FontId::proportional(size));
             ui.add_space(if *level <= 2 { 14.0 } else { 9.0 });
-            paint_job(ui, job, links, color);
+            paint_job(ui, job, links, strikes, color);
             if *level <= 2 {
                 let (rect, _) = ui.allocate_exact_size(
                     vec2(ui.available_width().min(ctx.content_width), 2.0),
@@ -99,15 +103,20 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
                     render_image(ui, src, alt, ctx);
                 }
             } else {
-                let (job, links) =
+                let (job, links, strikes) =
                     build_inline_job(inlines, ctx, ctx.theme.c.foreground, ctx.body_font());
-                paint_job(ui, job, links, ctx.theme.c.foreground);
+                paint_job(ui, job, links, strikes, ctx.theme.c.foreground);
             }
             ui.add_space(5.0);
         }
         Block::CodeBlock { lang, text } => {
             ui.add_space(8.0);
-            render_code_block(ui, lang.as_deref(), text, ctx);
+            let is_mermaid = lang
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"));
+            if !is_mermaid || !crate::mermaid::render(ui, text, ctx.theme, ctx.font_size) {
+                render_code_block(ui, lang.as_deref(), text, ctx);
+            }
             ui.add_space(8.0);
         }
         Block::BlockQuote { blocks } => {
@@ -197,17 +206,31 @@ struct LinkSpan {
     url: String,
 }
 
+/// A strikethrough span in character offsets, drawn manually at the row's
+/// optical center (see `Fmt::to_format` for why).
+struct StrikeSpan {
+    start: usize,
+    end: usize,
+    size: f32,
+    color: Color32,
+}
+
 #[derive(Clone)]
 struct Fmt {
     font: FontId,
     color: Color32,
     bg: Color32,
     italic: bool,
-    strike: bool,
     underline: bool,
 }
 
 impl Fmt {
+    // NOTE: strikethrough is NOT expressed via `TextFormat.strikethrough`.
+    // egui places decoration lines at the center of the glyph's *logical*
+    // rect, which derives from the font's ascent/descent metrics. With CJK
+    // fallback fonts (PingFang's ascent ≈ 1.16em) the line lands visibly
+    // below the glyph's optical middle. We therefore record strike spans and
+    // draw the line ourselves at the row's visual center (see paint_job).
     fn to_format(&self, line_h: f32) -> TextFormat {
         TextFormat {
             font_id: self.font.clone(),
@@ -217,11 +240,6 @@ impl Fmt {
             expand_bg: 1.5,
             italics: self.italic,
             underline: if self.underline {
-                Stroke::new(1.0, self.color)
-            } else {
-                Stroke::NONE
-            },
-            strikethrough: if self.strike {
                 Stroke::new(1.0, self.color)
             } else {
                 Stroke::NONE
@@ -237,7 +255,6 @@ fn base_fmt(font: FontId, color: Color32) -> Fmt {
         color,
         bg: Color32::TRANSPARENT,
         italic: false,
-        strike: false,
         underline: false,
     }
 }
@@ -248,21 +265,23 @@ fn build_inline_job(
     ctx: &RenderCtx,
     color: Color32,
     font: FontId,
-) -> (LayoutJob, Vec<LinkSpan>) {
+) -> (LayoutJob, Vec<LinkSpan>, Vec<StrikeSpan>) {
     let mut job = LayoutJob::default();
     let mut links = Vec::new();
+    let mut strikes = Vec::new();
     let mut offset = 0usize;
     for inl in inlines {
         append_inline(
             &mut job,
             &mut links,
+            &mut strikes,
             &mut offset,
             inl,
             ctx,
             &base_fmt(font.clone(), color),
         );
     }
-    (job, links)
+    (job, links, strikes)
 }
 
 fn append_text(job: &mut LayoutJob, offset: &mut usize, text: &str, fmt: &Fmt, line_h: f32) {
@@ -273,6 +292,7 @@ fn append_text(job: &mut LayoutJob, offset: &mut usize, text: &str, fmt: &Fmt, l
 fn append_inline(
     job: &mut LayoutJob,
     links: &mut Vec<LinkSpan>,
+    strikes: &mut Vec<StrikeSpan>,
     offset: &mut usize,
     inl: &Inline,
     ctx: &RenderCtx,
@@ -294,21 +314,28 @@ fn append_inline(
             let mut sf = f.clone();
             sf.color = ctx.theme.c.heading;
             for c in children {
-                append_inline(job, links, offset, c, ctx, &sf);
+                append_inline(job, links, strikes, offset, c, ctx, &sf);
             }
         }
         Inline::Emphasis(children) => {
             let mut ef = f.clone();
             ef.italic = true;
             for c in children {
-                append_inline(job, links, offset, c, ctx, &ef);
+                append_inline(job, links, strikes, offset, c, ctx, &ef);
             }
         }
         Inline::Strikethrough(children) => {
-            let mut sf = f.clone();
-            sf.strike = true;
+            let start = *offset;
             for c in children {
-                append_inline(job, links, offset, c, ctx, &sf);
+                append_inline(job, links, strikes, offset, c, ctx, f);
+            }
+            if *offset > start {
+                strikes.push(StrikeSpan {
+                    start,
+                    end: *offset,
+                    size: f.font.size,
+                    color: f.color,
+                });
             }
         }
         Inline::Link { dest, children } => {
@@ -319,7 +346,7 @@ fn append_inline(
             };
             let start = *offset;
             for c in children {
-                append_inline(job, links, offset, c, ctx, &lf);
+                append_inline(job, links, strikes, offset, c, ctx, &lf);
             }
             links.push(LinkSpan {
                 start,
@@ -363,13 +390,57 @@ fn append_inline(
     }
 }
 
-/// Layout and paint a rich-text job, wiring up clickable link spans.
-fn paint_job(ui: &mut Ui, mut job: LayoutJob, links: Vec<LinkSpan>, default: Color32) {
+/// Layout and paint a rich-text job, wiring up clickable link spans and
+/// manually-drawn strikethrough lines.
+fn paint_job(
+    ui: &mut Ui,
+    mut job: LayoutJob,
+    links: Vec<LinkSpan>,
+    strikes: Vec<StrikeSpan>,
+    default: Color32,
+) {
     let wrap_width = ui.available_width().max(20.0);
     job.wrap.max_width = wrap_width;
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
     ui.painter().galley(rect.min, galley.clone(), default);
+
+    // Strikethrough: a line through the *optical* middle of the glyphs, i.e.
+    // the center of the row's ink bounds (`mesh_bounds` is the union of the
+    // tight glyph sprites). Metric-based positioning (egui's built-in strike
+    // sits at the logical box center) lands below the visual middle with CJK
+    // fallback fonts whose ascent is much larger than the latin one.
+    if !strikes.is_empty() {
+        let mut row_start = 0usize;
+        for placed in &galley.rows {
+            let row_chars = placed.row.glyphs.len() + usize::from(placed.row.ends_with_newline);
+            let row_end = row_start + row_chars;
+            if placed.row.glyphs.is_empty() {
+                row_start = row_end;
+                continue;
+            }
+            let ink = placed.row.visuals.mesh_bounds;
+            let strike_y = if ink.is_finite() && ink.height() > 0.0 {
+                rect.min.y + placed.pos.y + ink.center().y
+            } else {
+                rect.min.y + placed.rect().center().y
+            };
+            for st in &strikes {
+                let s = st.start.max(row_start);
+                let e = st.end.min(row_end);
+                if s >= e {
+                    continue;
+                }
+                let sx = row_glyph_x(placed, s - row_start, rect.min.x);
+                let ex = row_glyph_x(placed, e - row_start, rect.min.x);
+                ui.painter().line_segment(
+                    [pos2(sx, strike_y), pos2(ex, strike_y)],
+                    Stroke::new((st.size / 12.0).max(1.0), st.color),
+                );
+            }
+            row_start = row_end;
+        }
+    }
 
     for link in &links {
         if link.start > link.end || link.end > galley.text().chars().count() {
@@ -844,6 +915,21 @@ fn html_text(raw: &str) -> String {
         .replace("&#39;", "'")
         .trim()
         .to_string()
+}
+
+/// X coordinate (absolute) of character `idx` within a galley row; an index
+/// past the last glyph resolves to the row's trailing edge.
+fn row_glyph_x(placed: &egui::epaint::text::PlacedRow, idx: usize, galley_x: f32) -> f32 {
+    let glyphs = &placed.row.glyphs;
+    if glyphs.is_empty() {
+        return galley_x + placed.pos.x;
+    }
+    if idx < glyphs.len() {
+        galley_x + glyphs[idx].pos.x
+    } else {
+        let last = &glyphs[glyphs.len() - 1];
+        galley_x + last.pos.x + last.advance_width
+    }
 }
 
 fn open_url(url: &str) {
