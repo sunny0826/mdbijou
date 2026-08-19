@@ -1,6 +1,49 @@
-//! Theme system: color model, builtin themes, syntax-highlight palette.
+//! Theme system: color model, builtin themes, syntax-highlight palette, and
+//! shared spacing/rounding design tokens.
 
 use egui::Color32;
+
+/// Shared spacing/rounding design tokens (replacing scattered magic numbers).
+#[derive(Debug, Clone, Copy)]
+pub struct Metrics {
+    pub radius_sm: f32, // 4  small buttons, capsules, code blocks
+    pub radius_md: f32, // 8  cards, inputs, inner segmented slots
+    pub radius_lg: f32, // 12 settings card, dialogs, outer segmented control
+    #[allow(dead_code)] // spacing tokens consumed incrementally (P1)
+    pub space_xs: f32, // 4
+    #[allow(dead_code)]
+    pub space_sm: f32, // 8
+    #[allow(dead_code)]
+    pub space_md: f32, // 12
+    #[allow(dead_code)]
+    pub space_lg: f32, // 20
+    pub hairline: f32,  // 1 physical px
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            radius_sm: 4.0,
+            radius_md: 8.0,
+            radius_lg: 12.0,
+            space_xs: 4.0,
+            space_sm: 8.0,
+            space_md: 12.0,
+            space_lg: 20.0,
+            hairline: 1.0,
+        }
+    }
+}
+
+impl Metrics {
+    /// Metrics with `hairline` = 1 physical px at `scale_factor`.
+    pub fn scaled(scale_factor: f32) -> Self {
+        Self {
+            hairline: 1.0 / scale_factor.max(1.0),
+            ..Self::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -36,6 +79,13 @@ pub struct Colors {
     pub hr: Color32,
     pub selection_bg: Color32,
     pub image_bg: Color32,
+    /// Elevated surface (slightly lighter/darker than background): status bar,
+    /// sidebars, floating toolbars.
+    pub surface: Color32,
+    /// Positive feedback (save success etc.).
+    pub success: Color32,
+    /// Negative feedback (save failure etc.).
+    pub error: Color32,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +155,9 @@ fn github_light() -> Theme {
         hr: hex("#d8dee4"),
         selection_bg: hex("#b6d7ff"),
         image_bg: hex("#f6f8fa"),
+        surface: hex("#f6f8fa"),
+        success: Color32::from_rgb(70, 170, 90),
+        error: Color32::from_rgb(220, 90, 70),
     };
     let syntax = SyntaxColors {
         comment: hex("#6e7781"),
@@ -148,6 +201,9 @@ fn github_dark() -> Theme {
         hr: hex("#30363d"),
         selection_bg: hex("#264f78"),
         image_bg: hex("#161b22"),
+        surface: hex("#161b22"),
+        success: Color32::from_rgb(63, 185, 80),
+        error: Color32::from_rgb(248, 81, 73),
     };
     let syntax = SyntaxColors {
         comment: hex("#8b949e"),
@@ -191,6 +247,9 @@ fn sepia() -> Theme {
         hr: hex("#d6c8a8"),
         selection_bg: hex("#dccfae"),
         image_bg: hex("#efe4c8"),
+        surface: hex("#efe4c8"),
+        success: Color32::from_rgb(70, 170, 90),
+        error: Color32::from_rgb(220, 90, 70),
     };
     let syntax = SyntaxColors {
         comment: hex("#9a8b7a"),

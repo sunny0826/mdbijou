@@ -10,7 +10,7 @@ use crate::highlight::{self, Highlighter};
 use crate::images::ImageStore;
 use crate::install;
 use crate::render::RenderCtx;
-use crate::theme::{Theme, ThemeRegistry};
+use crate::theme::{Metrics, Theme, ThemeRegistry};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_phosphor::regular;
@@ -36,6 +36,8 @@ pub struct MdbijouApp {
     show_settings: bool,
     /// Result of the last CLI-install attempt, shown in the settings page.
     cli_status: Option<install::InstallResult>,
+    /// 1-based cursor (line, column) in edit mode, for the status bar.
+    cursor: Option<(usize, usize)>,
     /// File paths sent by the OS (Finder double-click, `open`, Dock drop).
     open_rx: std::sync::mpsc::Receiver<PathBuf>,
 }
@@ -106,6 +108,7 @@ impl MdbijouApp {
             feedback: None,
             show_settings: false,
             cli_status: None,
+            cursor: None,
             open_rx,
         }
     }
@@ -114,6 +117,10 @@ impl MdbijouApp {
         self.registry
             .get(&self.theme_id)
             .unwrap_or(&self.registry.themes[0])
+    }
+
+    fn metrics(&self, ctx: &egui::Context) -> Metrics {
+        Metrics::scaled(ctx.pixels_per_point())
     }
 
     fn rebuild_highlighter(&mut self) {
@@ -162,9 +169,9 @@ impl MdbijouApp {
         let ok = config::atomic_write(&path, self.doc.text.as_bytes()).is_ok();
         if ok {
             self.doc.dirty = false;
-            self.flash("已保存", Color32::from_rgb(70, 170, 90));
+            self.flash("已保存", self.theme().c.success);
         } else {
-            self.flash("保存失败", Color32::from_rgb(220, 90, 70));
+            self.flash("保存失败", self.theme().c.error);
         }
         ok
     }
@@ -179,11 +186,11 @@ impl MdbijouApp {
             if ok {
                 self.doc.path = Some(path);
                 self.doc.dirty = false;
-                self.flash("已保存", Color32::from_rgb(70, 170, 90));
+                self.flash("已保存", self.theme().c.success);
                 return true;
             }
         }
-        self.flash("保存取消或失败", Color32::from_rgb(220, 90, 70));
+        self.flash("保存取消或失败", self.theme().c.error);
         false
     }
 
@@ -278,19 +285,12 @@ impl MdbijouApp {
         }
     }
 
-    /// The traffic-light toolbar: document title, hover-revealed action icons,
-    /// and an edit/preview switch pinned to the top-right.
+    /// The traffic-light toolbar: hover-revealed action icons and an
+    /// edit/preview switch pinned to the top-right.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
-        let title = self
-            .doc
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "untitled".into());
-        let dirty = self.doc.dirty;
 
         // The whole bar is draggable (empty areas) so the window can still be
         // moved now that the native title bar is transparent.
@@ -386,14 +386,11 @@ impl MdbijouApp {
             _ => {}
         }
 
-        // Title / feedback / view switch. All three are painted/allocated
-        // directly against the bar's geometric center: egui row layout aligns
-        // children by content height (and galleys carry ascender/descender
-        // padding), which left the text sitting visibly high in the bar.
+        // Feedback (save status) and view switch are drawn against the bar's
+        // geometric center: egui row layout aligns children by content height
+        // (and galleys carry ascender/descender padding), which left the text
+        // sitting visibly high in the bar.
         let center_y = bar_rect.center().y;
-        let title_galley =
-            ui.fonts_mut(|f| f.layout_no_wrap(title.clone(), egui::FontId::proportional(13.0), fg));
-        let title_w = title_galley.size().x;
         let feedback = match &self.feedback {
             Some((expiry, msg, color)) if *expiry > Instant::now() => Some((
                 ui.fonts_mut(|f| {
@@ -408,32 +405,14 @@ impl MdbijouApp {
             .map(|(g, _)| g.size().x + 8.0)
             .unwrap_or(0.0);
 
-        // Center the (dot slot + title + feedback) group horizontally.
-        let total_w = 12.0 + title_w + feedback_w;
+        // Center the feedback group horizontally.
+        let total_w = feedback_w;
         let min_left = crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 8.0;
         let start_x =
             (bar_rect.left() + (bar_rect.width() - total_w) / 2.0).max(bar_rect.left() + min_left);
 
-        let title_min_x = start_x + 12.0; // dot slot
-        let title_center = egui::pos2(title_min_x + title_w / 2.0, center_y);
-        let title_rect =
-            egui::Rect::from_center_size(title_center, egui::vec2(title_w, title_galley.size().y));
-        if dirty {
-            ui.painter()
-                .circle_filled(egui::pos2(title_min_x - 5.0, center_y), 3.0, muted);
-        }
-        let title_resp = ui.interact(title_rect, ui.id().with("bar_title"), egui::Sense::hover());
-        ui.painter()
-            .galley(title_center - title_galley.size() / 2.0, title_galley, fg);
-        let state = if dirty { "未保存" } else { "已保存" };
-        match &self.doc.path {
-            Some(p) => title_resp.on_hover_text(format!("{} · {state}", p.display())),
-            None => title_resp.on_hover_text(state),
-        };
-
         if let Some((g, color)) = feedback {
-            let pos =
-                egui::pos2(title_rect.max.x + 8.0, center_y) - egui::vec2(0.0, g.size().y / 2.0);
+            let pos = egui::pos2(start_x, center_y) - egui::vec2(0.0, g.size().y / 2.0);
             ui.painter().galley(pos, g, color);
         }
 
@@ -454,7 +433,8 @@ impl MdbijouApp {
     fn view_switch(&mut self, ui: &mut egui::Ui, theme: &Theme) -> bool {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(92.0, 22.0), egui::Sense::hover());
         let painter = ui.painter();
-        let rounding = egui::CornerRadius::same(11);
+        let metrics = self.metrics(ui.ctx());
+        let rounding = egui::CornerRadius::same(metrics.radius_lg as u8);
         painter.rect_filled(rect, rounding, theme.c.code_bg);
         painter.rect_stroke(
             rect,
@@ -470,7 +450,7 @@ impl MdbijouApp {
             egui::Rect::from_min_max(egui::pos2(rect.min.x + half, rect.min.y), rect.max);
         let is_preview = self.view == View::Preview;
         let sel_rect = if is_preview { preview_rect } else { edit_rect };
-        let sel_rounding = egui::CornerRadius::same(9);
+        let sel_rounding = egui::CornerRadius::same(metrics.radius_md as u8);
         painter.rect_filled(sel_rect.shrink(2.0), sel_rounding, theme.c.background);
         painter.rect_stroke(
             sel_rect.shrink(2.0),
@@ -495,7 +475,12 @@ impl MdbijouApp {
         let hovered = preview_resp.hovered() || edit_resp.hovered();
         if hovered {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            preview_resp.clone().on_hover_text("⌘E");
+            let hint = if is_preview {
+                "切换到编辑 (⌘E)"
+            } else {
+                "切换到预览 (⌘E)"
+            };
+            preview_resp.clone().on_hover_text(hint);
         }
         (preview_resp.clicked() && !is_preview) || (edit_resp.clicked() && is_preview)
     }
@@ -516,6 +501,7 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
+        let metrics = self.metrics(ctx);
         let accent = theme.c.link;
         let themes: Vec<(String, String, Color32)> = self
             .registry
@@ -557,7 +543,7 @@ impl MdbijouApp {
                 ui.set_opacity(fade);
                 egui::Frame::new()
                     .fill(theme.c.background)
-                    .corner_radius(14.0)
+                    .corner_radius(metrics.radius_lg)
                     .stroke(egui::Stroke::new(1.0, theme.c.hr))
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 8],
@@ -667,9 +653,10 @@ impl MdbijouApp {
                                     .find(|f| f.id == self.cfg.font_family)
                                     .map(|f| f.name)
                                     .unwrap_or("默认");
+                                let shown = fit_combo_text(ui, current, 130.0);
                                 egui::ComboBox::from_id_salt("body_font")
                                     .width(170.0)
-                                    .selected_text(RichText::new(current).size(12.0))
+                                    .selected_text(RichText::new(shown).size(12.0))
                                     .show_ui(ui, |ui| {
                                         for f in crate::fonts::BODY_FONTS {
                                             if ui
@@ -752,10 +739,12 @@ impl MdbijouApp {
                                     } else {
                                         (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
                                     };
-                                    ui.label(
-                                        RichText::new(format!("{mark}  {}", res.message))
-                                            .size(12.0)
-                                            .color(color),
+                                    ink_centered_label(
+                                        ui,
+                                        &format!("{mark}  {}", res.message),
+                                        egui::FontId::proportional(12.0),
+                                        color,
+                                        26.0,
                                     );
                                 }
                                 ui.with_layout(
@@ -853,12 +842,58 @@ fn settings_group(ui: &mut egui::Ui, theme: &Theme, add: impl FnOnce(&mut egui::
         });
 }
 
+/// Ink-optically center `text` within a fixed `height`-tall slot sized to the
+/// text. Uses a fixed height (not available-height) so it can never distort the
+/// layout, while CJK glyphs land on the true vertical center of the slot.
+fn ink_centered_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    height: f32,
+) {
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), color));
+    let w = galley.size().x;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
+    paint_optical_centered_text(ui.painter(), rect, text, font, color);
+}
+
 /// One settings row: label on the left, controls right-aligned.
 fn settings_row(ui: &mut egui::Ui, label: &str, fg: Color32, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(13.0).color(fg));
+        // Fixed-height slot (matches the tallest control) keeps the label from
+        // sitting high when a taller control later grows the row.
+        ink_centered_label(ui, label, egui::FontId::proportional(13.0), fg, 26.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
     });
+}
+
+/// Truncate `text` with an ellipsis so its 12pt layout fits within `max_w`,
+/// keeping a closed combo box a fixed width regardless of the option length.
+fn fit_combo_text(ui: &mut egui::Ui, text: &str, max_w: f32) -> String {
+    let font = egui::FontId::proportional(12.0);
+    let text_w = |s: &str| {
+        ui.fonts_mut(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE))
+            .size()
+            .x
+    };
+    if text_w(text) <= max_w {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let s: String = chars[..mid].iter().collect();
+        if text_w(&s) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut s: String = chars[..lo.saturating_sub(1)].iter().collect();
+    s.push('…');
+    s
 }
 
 /// Full-width 1px separator used between rows inside a settings group.
@@ -942,8 +977,68 @@ impl eframe::App for MdbijouApp {
         visuals.override_text_color = Some(fg);
         visuals.selection.bg_fill = sel;
         visuals.selection.stroke = egui::Stroke::new(1.0, sel);
-        visuals.widgets.hovered.weak_bg_fill = th.c.code_bg;
+        visuals.window_corner_radius = egui::CornerRadius::same(10);
+
+        // Polish egui widgets (buttons, combo boxes, sliders) to match the
+        // theme: rounded corners from the design tokens, surface fills, and an
+        // accent-tinted hover/active state.
+        let m = self.metrics(ctx);
+        let accent = th.c.link;
+        let rounded_md = egui::CornerRadius::same(m.radius_md as u8);
+        // A neutral "control" fill distinct from the code_bg group background so
+        // slider rails stay visible; also used as the default button fill.
+        let control_bg = match th.kind {
+            crate::theme::ThemeKind::Light => Color32::from_rgb(0xe9, 0xe9, 0xe9),
+            crate::theme::ThemeKind::Dark => Color32::from_rgb(0x3c, 0x3c, 0x3c),
+        };
+        visuals.widgets.noninteractive = egui::style::WidgetVisuals {
+            bg_fill: th.c.code_bg,
+            weak_bg_fill: Color32::TRANSPARENT,
+            bg_stroke: egui::Stroke::new(1.0, th.c.table_border),
+            corner_radius: egui::CornerRadius::same(m.radius_sm as u8),
+            fg_stroke: egui::Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
+        visuals.widgets.inactive = egui::style::WidgetVisuals {
+            bg_fill: control_bg,
+            weak_bg_fill: Color32::TRANSPARENT,
+            bg_stroke: egui::Stroke::new(1.0, th.c.table_border),
+            corner_radius: rounded_md,
+            fg_stroke: egui::Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
+        visuals.widgets.hovered = egui::style::WidgetVisuals {
+            bg_fill: lerp_color(control_bg, accent, 0.08),
+            weak_bg_fill: accent.gamma_multiply(0.10),
+            bg_stroke: egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
+            corner_radius: rounded_md,
+            fg_stroke: egui::Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
+        visuals.widgets.active = egui::style::WidgetVisuals {
+            bg_fill: lerp_color(control_bg, accent, 0.14),
+            weak_bg_fill: accent.gamma_multiply(0.16),
+            bg_stroke: egui::Stroke::new(1.0, accent),
+            corner_radius: rounded_md,
+            fg_stroke: egui::Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
+        visuals.widgets.open = egui::style::WidgetVisuals {
+            bg_fill: control_bg,
+            weak_bg_fill: accent.gamma_multiply(0.08),
+            bg_stroke: egui::Stroke::new(1.0, accent.gamma_multiply(0.5)),
+            corner_radius: rounded_md,
+            fg_stroke: egui::Stroke::new(1.0, fg),
+            expansion: 0.0,
+        };
         ctx.set_visuals(visuals);
+
+        // More breathing room around interactive controls.
+        ctx.style_mut(|s| {
+            s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.interact_size.y = 26.0;
+            s.spacing.slider_rail_height = 4.0;
+        });
 
         // ------- top bar (traffic-light toolbar) -------
         // Height is twice the measured traffic-light center so the buttons
@@ -970,6 +1065,9 @@ impl eframe::App for MdbijouApp {
                     self.show_editor(ui);
                 }
             });
+
+        // ------- status bar -------
+        self.status_bar(ctx);
 
         // ------- settings page -------
         self.show_settings(ctx);
@@ -1006,6 +1104,7 @@ impl MdbijouApp {
             effective,
             self.cfg.font_size,
             self.cfg.line_height,
+            Metrics::scaled(ui.ctx().pixels_per_point()),
         );
 
         // Vertically center the document when it is shorter than the
@@ -1042,10 +1141,135 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let mut editor = Editor::new(&self.cfg, &theme);
         let res = editor.show(ui, &mut self.doc, &mut *self.hl);
+        self.cursor = res.cursor;
         if res.changed {
             self.last_edit_saved = Instant::now();
             self.need_reparse = true;
         }
+    }
+
+    /// Bottom 24px status bar: file path, word/char count, cursor (edit mode),
+    /// save feedback on the left; font size and theme quick switch on the right.
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        if !self.cfg.show_status_bar {
+            return;
+        }
+        let theme = self.theme().clone();
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
+        let hairline = self.metrics(ctx).hairline;
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(24.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.c.surface)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
+            .show(ctx, |ui| {
+                let bar = ui.max_rect();
+                ui.painter().hline(
+                    bar.left()..=bar.right(),
+                    bar.top(),
+                    egui::Stroke::new(hairline, theme.c.hr),
+                );
+                let inner = ui.available_rect_before_wrap();
+                ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        match &self.doc.path {
+                            Some(p) => {
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(p.display().to_string())
+                                                .size(11.0)
+                                                .color(muted),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text("在 Finder 中显示");
+                                if resp.clicked() {
+                                    reveal_in_finder(p);
+                                }
+                            }
+                            None => {
+                                ui.label(RichText::new("未命名").size(11.0).color(muted));
+                            }
+                        }
+                        let words = self.doc.text.split_whitespace().count();
+                        let chars = self.doc.text.chars().count();
+                        ui.label(
+                            RichText::new(format!("{words} 词 · {chars} 字符"))
+                                .size(11.0)
+                                .color(muted),
+                        );
+                        if self.view == View::Edit {
+                            if let Some((line, col)) = self.cursor {
+                                ui.label(
+                                    RichText::new(format!("{line}:{col}")).size(11.0).color(fg),
+                                );
+                            }
+                        }
+                        if let Some((expiry, msg, color)) = &self.feedback {
+                            if *expiry > Instant::now() {
+                                ui.label(RichText::new(msg).size(11.0).color(*color));
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(6.0);
+                            let minus = ui
+                                .add(
+                                    egui::Button::new(RichText::new("A-").size(11.0).color(muted))
+                                        .frame(false),
+                                )
+                                .on_hover_text("减小字号");
+                            if minus.clicked() {
+                                self.adjust_font_size(-1.0);
+                            }
+                            let plus = ui
+                                .add(
+                                    egui::Button::new(RichText::new("A+").size(11.0).color(muted))
+                                        .frame(false),
+                                )
+                                .on_hover_text("增大字号");
+                            if plus.clicked() {
+                                self.adjust_font_size(1.0);
+                            }
+                            let th = ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(self.theme().name.clone()).size(11.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("切换主题");
+                            if th.clicked() {
+                                self.cycle_theme();
+                            }
+                        });
+                    });
+                });
+            });
+    }
+
+    fn adjust_font_size(&mut self, delta: f32) {
+        let new = (self.cfg.font_size + delta).clamp(12.0, 28.0);
+        if (new - self.cfg.font_size).abs() > 0.01 {
+            self.cfg.font_size = new;
+            config::save(&self.cfg);
+        }
+    }
+
+    fn cycle_theme(&mut self) {
+        let idx = self
+            .registry
+            .themes
+            .iter()
+            .position(|t| t.id == self.theme_id)
+            .unwrap_or(0);
+        let next = self.registry.themes[(idx + 1) % self.registry.themes.len()]
+            .id
+            .clone();
+        self.switch_theme(&next);
     }
 }
 
@@ -1055,3 +1279,14 @@ fn base_dir_for(doc: &Document) -> PathBuf {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
+
+#[cfg(target_os = "macos")]
+fn reveal_in_finder(path: &std::path::Path) {
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_in_finder(_path: &std::path::Path) {}

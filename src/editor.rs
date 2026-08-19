@@ -62,6 +62,8 @@ pub struct Editor<'a> {
 
 pub struct EditorResult {
     pub changed: bool,
+    /// 1-based (line, column) of the cursor, when a cursor exists.
+    pub cursor: Option<(usize, usize)>,
 }
 
 impl<'a> Editor<'a> {
@@ -220,8 +222,24 @@ impl<'a> Editor<'a> {
                     }
                 });
             });
+        let cursor = egui::TextEdit::load_state(ui.ctx(), te_id)
+            .and_then(|s| s.cursor.char_range())
+            .map(|r| r.primary.index)
+            .map(|idx| {
+                let line = count_newlines(&doc.text, idx);
+                let mut col = 0;
+                for c in doc.text.chars().take(idx) {
+                    if c == '\n' {
+                        col = 0;
+                    } else {
+                        col += 1;
+                    }
+                }
+                (line + 1, col + 1)
+            });
         EditorResult {
             changed: te_changed,
+            cursor,
         }
     }
 }
