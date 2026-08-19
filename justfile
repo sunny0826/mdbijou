@@ -63,6 +63,19 @@ size:
 baseline:
     ./scripts/bench.sh
 
+# ---------- 打包与发布 ----------
+# 从 logo.png 生成 assets/mdbijou.icns 应用图标（sips + iconutil）
+icon:
+    ./scripts/make-icon.sh
+
+# 打包 dist/mdbijou.app（release 构建 + 图标 + Info.plist + ad-hoc 签名）
+bundle:
+    ./scripts/bundle.sh
+
+# 打包 .app 并生成 dist/mdbijou-<version>.dmg 发布镜像
+dmg:
+    ./scripts/bundle.sh --dmg
+
 # 清理构建产物
 clean:
     cargo clean

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub theme: String,
+    /// Body font for the preview view (id from fonts::BODY_FONTS).
+    pub font_family: String,
     pub font_size: f32,
     pub line_height: f32,
     pub content_width: f32,
@@ -34,6 +36,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "github-light".into(),
+            font_family: "default".into(),
             font_size: 16.0,
             line_height: 1.5,
             content_width: 720.0,

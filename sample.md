@@ -53,3 +53,19 @@ fn main() {
 </div>
 
 ![远程示例图片](https://picsum.photos/400/200)
+
+## Mermaid 示例
+
+```mermaid
+graph TD
+  A[开始] --> B{条件判断}
+  B -->|是| C(处理逻辑)
+  B -->|否| D[结束]
+  C --> D
+```
+
+```mermaid
+flowchart LR
+  用户 --> 前端((Web)) --> 后端{API}
+  后端 --> 数据库[(存储)]
+```
