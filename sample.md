@@ -49,8 +49,11 @@ End of body.
 This is an HTML paragraph: <span style="color: red">red text</span> and <b>bold</b>.
 
 <div>
-  <p>Block-level HTML content (rendered as text only, not executed).</p>
+  <p>Block-level HTML content (rendered via the whitelist: headings, paragraphs, links, images).</p>
 </div>
+
+<h3 align="center">Centered HTML Heading</h3>
+<p align="center">Centered paragraph with a <a href="https://github.com/sunny0826/mdbijou">link</a>.</p>
 
 ![Remote sample image](https://picsum.photos/400/200)
 

@@ -31,6 +31,25 @@ pub trait Highlighter {
     fn markdown_line(&mut self, line: &str) -> Line;
 }
 
+/// Round `idx` down to the nearest UTF-8 character boundary in `s`.
+///
+/// Every index produced by [`str::find`] on an ASCII pattern is already a char
+/// boundary, but defensive rounding guarantees we never slice through the
+/// middle of a multi-byte character (e.g. full-width punctuation), which would
+/// panic. Clamps to `s.len()` and never drops characters.
+fn char_boundary(s: &str, idx: usize) -> usize {
+    let idx = idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        idx
+    } else {
+        s[..idx]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // lite-highlight: self-contained tokenizer (no syntect) — used only when the
 // `highlight` feature is disabled.
@@ -63,7 +82,7 @@ impl Highlighter for LiteHighlighter {
                 color: color,
                 style: 0,
             });
-            let adv = adv.min(rest.len());
+            let adv = char_boundary(rest, adv);
             rest = &rest[adv..];
         }
         out
@@ -94,21 +113,36 @@ fn next_code_token(s: &str, sy: &crate::theme::SyntaxColors) -> (String, Color32
             if j < bytes.len() {
                 j += 1;
             }
-            let end = j.min(s.len());
-            return (s[start..end].to_string(), sy.string, end - start);
+            let end = char_boundary(s, j.min(s.len()));
+            if start > 0 {
+                // Emit the plain prefix first; the string token is handled on
+                // the next call so no bytes are dropped or duplicated.
+                return (s[..start].to_string(), Color32::TRANSPARENT, start);
+            }
+            return (s[start..end].to_string(), sy.string, end);
         }
         if c.is_ascii_digit() {
             let start = i;
             while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
                 i += 1;
             }
-            return (s[start..i].to_string(), sy.number, i - start);
+            let end = char_boundary(s, i);
+            if start > 0 {
+                return (s[..start].to_string(), Color32::TRANSPARENT, start);
+            }
+            return (s[start..end].to_string(), sy.number, end);
         }
         if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            return (s[i..].to_string(), sy.comment, bytes.len() - i);
+            if i > 0 {
+                return (s[..i].to_string(), Color32::TRANSPARENT, i);
+            }
+            return (s[i..].to_string(), sy.comment, bytes.len());
         }
-        if c == b'#' && (i == 0 || s[..i].chars().all(char::is_whitespace)) {
-            return (s[i..].to_string(), sy.comment, bytes.len() - i);
+        if c == b'#' && (i == 0 || s[..char_boundary(s, i)].chars().all(char::is_whitespace)) {
+            if i > 0 {
+                return (s[..i].to_string(), Color32::TRANSPARENT, i);
+            }
+            return (s[i..].to_string(), sy.comment, bytes.len());
         }
         i += 1;
     }
@@ -135,20 +169,20 @@ fn markdown_line_highlight(line: &str, sy: &crate::theme::SyntaxColors) -> Line 
     let mut rest = line;
     while !rest.is_empty() {
         if let Some(start) = rest.find('`') {
-            let after = &rest[start + 1..];
+            let after = &rest[char_boundary(rest, start + 1)..];
             if let Some(end_rel) = after.find('`') {
-                let code_span = &rest[start..start + 1 + end_rel + 1];
+                let code_end = char_boundary(rest, start + 1 + end_rel + 1);
                 out.push(Span {
                     text: rest[..start].to_string(),
                     color: Color32::TRANSPARENT,
                     style: 0,
                 });
                 out.push(Span {
-                    text: code_span.to_string(),
+                    text: rest[start..code_end].to_string(),
                     color: sy.markup_code,
                     style: 0,
                 });
-                rest = &rest[start + code_span.len()..];
+                rest = &rest[code_end..];
                 continue;
             }
         }
@@ -252,5 +286,48 @@ pub fn new_highlighter(theme: &Theme) -> Box<dyn Highlighter> {
     #[cfg(not(feature = "highlight"))]
     {
         Box::new(LiteHighlighter::new(theme))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn syntax() -> crate::theme::SyntaxColors {
+        crate::theme::builtin("github-light")
+            .expect("builtin theme")
+            .syntax
+    }
+
+    fn joined(spans: &Line) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn markdown_line_highlight_preserves_fullwidth_punctuation() {
+        let line = "你好，世界！测试（中文）【标点】《引号》“双引”‘单引’。；：、？";
+        assert_eq!(joined(&markdown_line_highlight(line, &syntax())), line);
+    }
+
+    #[test]
+    fn markdown_line_highlight_keeps_backtick_spans_byte_safe() {
+        // Backticks around CJK must not truncate the multi-byte content.
+        let line = "代码`你好，世界！`标点，后。";
+        assert_eq!(joined(&markdown_line_highlight(line, &syntax())), line);
+    }
+
+    #[test]
+    fn markdown_line_highlight_heading_preserves_cjk() {
+        let line = "## 标题，含标点！";
+        assert_eq!(joined(&markdown_line_highlight(line, &syntax())), line);
+    }
+
+    #[cfg(not(feature = "highlight"))]
+    #[test]
+    fn lite_code_line_preserves_fullwidth_punctuation() {
+        let th = crate::theme::builtin("github-light").unwrap();
+        let mut hl = LiteHighlighter::new(&th);
+        let line = "print('你好，世界！')";
+        assert_eq!(joined(&hl.code_line(Some("py"), line)), line);
     }
 }

@@ -11,6 +11,7 @@ use crate::images::ImageStore;
 use crate::install;
 use crate::render::RenderCtx;
 use crate::theme::{Metrics, Theme, ThemeRegistry};
+use crate::toc::{self, TocEntry};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_phosphor::regular;
@@ -40,6 +41,17 @@ pub struct MdbijouApp {
     cursor: Option<(usize, usize)>,
     /// File paths sent by the OS (Finder double-click, `open`, Dock drop).
     open_rx: std::sync::mpsc::Receiver<PathBuf>,
+    /// TOC entries for the current document, refreshed before panels render.
+    toc_entries: Vec<TocEntry>,
+    /// On-screen rects of rendered headings (anchor, rect) from the last
+    /// preview pass; the TOC panel scrolls the preview using these.
+    heading_anchors: Vec<(String, egui::Rect)>,
+    /// TOC entry the user clicked; the preview consumes it next frame to scroll.
+    pending_toc_anchor: Option<String>,
+    /// Editor line to scroll to after a TOC click in edit view (0-indexed).
+    pending_editor_line: Option<usize>,
+    /// Narrow-window drawer visibility (wide windows use the side panel).
+    toc_drawer_open: bool,
 }
 
 #[derive(Debug)]
@@ -49,6 +61,7 @@ enum Cmd {
     Reload,
     Open,
     ToggleSettings,
+    ToggleToc,
 }
 
 impl MdbijouApp {
@@ -93,6 +106,7 @@ impl MdbijouApp {
             .set_fonts(crate::fonts::build_fonts(&cfg.font_family));
 
         let view = cfg.default_view;
+        let toc_drawer_open = cfg.show_toc;
 
         Self {
             cfg,
@@ -110,6 +124,11 @@ impl MdbijouApp {
             cli_status: None,
             cursor: None,
             open_rx,
+            toc_entries: Vec::new(),
+            heading_anchors: Vec::new(),
+            pending_toc_anchor: None,
+            pending_editor_line: None,
+            toc_drawer_open,
         }
     }
 
@@ -267,6 +286,7 @@ impl MdbijouApp {
                     self.view = View::Edit;
                 } else {
                     self.doc.reparse();
+                    self.need_reparse = false;
                     self.view = View::Preview;
                 }
             }
@@ -282,6 +302,11 @@ impl MdbijouApp {
             }
             Cmd::Open => self.open_via_dialog(),
             Cmd::ToggleSettings => self.show_settings = !self.show_settings,
+            Cmd::ToggleToc => {
+                self.cfg.show_toc = !self.cfg.show_toc;
+                self.toc_drawer_open = self.cfg.show_toc;
+                config::save(&self.cfg);
+            }
         }
     }
 
@@ -329,13 +354,10 @@ impl MdbijouApp {
         .into_iter()
         .enumerate()
         {
-            // All icons hide until the bar is hovered; the gear stays visible
-            // while the settings page is open as a close affordance.
-            let fade = if idx == 2 && self.show_settings {
-                1.0
-            } else {
-                reveal
-            };
+            // Gear stays visible while the settings page is open as a close
+            // affordance; other icons fade in on hover.
+            let active = idx == 2 && self.show_settings;
+            let fade = if active { 1.0 } else { reveal };
             let rect = egui::Rect::from_center_size(
                 egui::pos2(icon_x + 11.0, icon_y),
                 egui::vec2(22.0, 22.0),
@@ -361,11 +383,7 @@ impl MdbijouApp {
                         .gamma_multiply(fade),
                 );
             }
-            let base = if idx == 2 && self.show_settings {
-                fg
-            } else {
-                muted
-            };
+            let base = if active { fg } else { muted };
             let color = (if resp.hovered() { fg } else { base }).gamma_multiply(fade);
             ui.painter().text(
                 rect.center(),
@@ -513,6 +531,7 @@ impl MdbijouApp {
         let mut picked: Option<String> = None;
         let mut do_follow = false;
         let mut do_install = false;
+        let mut do_toc = false;
         let mut font_picked: Option<String> = None;
         let mut font_size_changed = false;
         let mut editor_size_changed = false;
@@ -663,6 +682,16 @@ impl MdbijouApp {
                                     }
                                 });
                                 ui.add_space(4.0);
+                            });
+                            ui.add_space(6.0);
+                            hairline(ui, theme.c.hr);
+                            ui.add_space(8.0);
+                            settings_row(ui, "显示目录", fg, |ui| {
+                                let mut show_toc = self.cfg.show_toc;
+                                if toggle_switch(ui, &mut show_toc, accent, muted) {
+                                    self.cfg.show_toc = show_toc;
+                                    do_toc = true;
+                                }
                             });
                             ui.add_space(2.0);
                         });
@@ -822,6 +851,9 @@ impl MdbijouApp {
         }
         if do_install {
             self.cli_status = Some(install::install_cli());
+        }
+        if do_toc {
+            config::save(&self.cfg);
         }
     }
 }
@@ -1155,13 +1187,23 @@ impl eframe::App for MdbijouApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.dispatch(Cmd::ToggleSettings);
         }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {
+            self.dispatch(Cmd::ToggleToc);
+        }
+
+        // ------- reparse pending edits before any panel reads the doc -------
+        if self.view == View::Preview && self.need_reparse {
+            self.doc.reparse();
+            self.need_reparse = false;
+        }
 
         // ------- visual theme (egui) derived from our theme -------
-        let th = self.theme();
+        let th = self.theme().clone();
         let kind = th.kind;
         let bg = th.c.background;
         let fg = th.c.foreground;
         let sel = th.c.selection_bg;
+        let surface = th.c.surface;
         let mut visuals = match kind {
             crate::theme::ThemeKind::Light => egui::Visuals::light(),
             crate::theme::ThemeKind::Dark => egui::Visuals::dark(),
@@ -1170,7 +1212,8 @@ impl eframe::App for MdbijouApp {
         visuals.window_fill = bg;
         visuals.override_text_color = Some(fg);
         visuals.selection.bg_fill = sel;
-        visuals.selection.stroke = egui::Stroke::new(1.0, sel);
+        // Selected glyphs are painted in `selection.stroke.color`.
+        visuals.selection.stroke = egui::Stroke::new(1.0, fg);
         visuals.window_corner_radius = egui::CornerRadius::same(10);
 
         // Polish egui widgets (buttons, combo boxes, sliders) to match the
@@ -1245,6 +1288,28 @@ impl eframe::App for MdbijouApp {
                 self.top_bar(ui);
             });
 
+        // ------- table of contents -------
+        let narrow = ctx.content_rect().width() < 800.0;
+        self.toc_entries = toc::extract(&self.doc.blocks);
+        let show_toc_panel = self.cfg.show_toc && !narrow;
+        if show_toc_panel {
+            egui::SidePanel::left("toc")
+                .resizable(true)
+                .default_width(220.0)
+                .width_range(160.0..=360.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(surface)
+                        .inner_margin(egui::Margin::symmetric(10, 10)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("目录").size(13.0).color(fg));
+                    ui.add_space(4.0);
+                    ui.separator();
+                    self.show_toc_panel(ui);
+                });
+        }
+
         // ------- central panel: preview or edit -------
         egui::CentralPanel::default()
             .frame(
@@ -1253,12 +1318,145 @@ impl eframe::App for MdbijouApp {
                     .inner_margin(egui::Margin::symmetric(0, 8)),
             )
             .show(ctx, |ui| {
+                if let Some(anchor) = self.pending_toc_anchor.take() {
+                    if self.view == View::Preview {
+                        if let Some((_, rect)) =
+                            self.heading_anchors.iter().find(|(a, _)| *a == anchor)
+                        {
+                            ui.scroll_to_rect(*rect, Some(egui::Align::Center));
+                        }
+                    } else {
+                        if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor) {
+                            self.pending_editor_line = Some(line);
+                        } else if let Some(entry) =
+                            self.toc_entries.iter().find(|e| e.anchor == anchor)
+                        {
+                            if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
+                                self.pending_editor_line = Some(line);
+                            }
+                        }
+                    }
+                }
                 if self.view == View::Preview {
                     self.show_preview(ui);
                 } else {
                     self.show_editor(ui);
                 }
             });
+
+        // ------- narrow-window TOC drawer -------
+        if self.cfg.show_toc && narrow {
+            let hr3 = th.c.hr;
+            let muted3 = th.c.muted;
+            let surface3 = surface;
+            let is_drawer_open = self.toc_drawer_open;
+            let (icon3, tip3) = if is_drawer_open {
+                (regular::CARET_LEFT, "收起目录")
+            } else {
+                (regular::CARET_RIGHT, "展开目录")
+            };
+            let near_left_narrow = ctx.input(|i| {
+                i.pointer
+                    .hover_pos()
+                    .map(|p| p.x < 36.0 && p.y > 2.0 * light_y)
+                    .unwrap_or(false)
+            });
+            let alpha3 = ctx.animate_bool(egui::Id::new("toc_drawer_reveal"), near_left_narrow);
+            if alpha3 > 0.01 {
+                egui::Area::new(egui::Id::new("toc_drawer_btn"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::LEFT_TOP, egui::vec2(6.0, 2.0 * light_y + 6.0))
+                    .show(ctx, |ui| {
+                        ui.set_opacity(alpha3);
+                        let frame = egui::Frame::new()
+                            .fill(surface3.gamma_multiply(alpha3))
+                            .stroke(egui::Stroke::new(1.0, hr3.gamma_multiply(alpha3)))
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(6, 8));
+                        frame.show(ui, |ui| {
+                            let c = muted3.gamma_multiply(alpha3);
+                            let resp = ui.add(
+                                egui::Button::new(RichText::new(icon3).size(12.0).color(c))
+                                    .frame(false),
+                            );
+                            if resp.clicked() {
+                                self.toc_drawer_open = !self.toc_drawer_open;
+                            }
+                            resp.on_hover_text(tip3);
+                        });
+                    });
+            }
+            let mut open = self.toc_drawer_open;
+            egui::Window::new("目录")
+                .id(egui::Id::new("toc_drawer"))
+                .open(&mut open)
+                .anchor(
+                    egui::Align2::LEFT_TOP,
+                    egui::vec2(12.0, 2.0 * light_y + 44.0),
+                )
+                .collapsible(false)
+                .resizable(false)
+                .default_width(220.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(surface)
+                        .inner_margin(egui::Margin::symmetric(10, 8)),
+                )
+                .show(ctx, |ui| {
+                    self.show_toc_panel(ui);
+                });
+            self.toc_drawer_open = open;
+        }
+        // ------- TOC toggle (same position, opposite arrow, hover-revealed) -------
+        if !narrow || !self.cfg.show_toc {
+            let has_headings = !toc::extract(&self.doc.blocks).is_empty();
+            if has_headings {
+                let hr2 = th.c.hr;
+                let muted2 = th.c.muted;
+                let surface2 = surface;
+                let is_open = self.cfg.show_toc;
+                let (icon, tip) = if is_open {
+                    (regular::CARET_LEFT, "收起目录 (⌘T)")
+                } else {
+                    (regular::CARET_RIGHT, "展开目录 (⌘T)")
+                };
+                let hover_id = egui::Id::new("toc_toggle_reveal");
+                let near_left = ctx.input(|i| {
+                    i.pointer
+                        .hover_pos()
+                        .map(|p| p.x < 36.0 && p.y > 2.0 * light_y)
+                        .unwrap_or(false)
+                });
+                let alpha = ctx.animate_bool(hover_id, near_left);
+                if alpha > 0.01 {
+                    egui::Area::new(egui::Id::new("toc_toggle_btn"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::LEFT_TOP, egui::vec2(6.0, 2.0 * light_y + 6.0))
+                        .show(ctx, |ui| {
+                            ui.set_opacity(alpha);
+                            let frame = egui::Frame::new()
+                                .fill(surface2.gamma_multiply(alpha))
+                                .stroke(egui::Stroke::new(1.0, hr2.gamma_multiply(alpha)))
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(6, 8));
+                            frame.show(ui, |ui| {
+                                let mut btn_color = muted2;
+                                btn_color = btn_color.gamma_multiply(alpha);
+                                let resp = ui.add(
+                                    egui::Button::new(
+                                        RichText::new(icon).size(12.0).color(btn_color),
+                                    )
+                                    .frame(false),
+                                );
+                                if resp.clicked() {
+                                    self.dispatch(Cmd::ToggleToc);
+                                }
+                                resp.on_hover_text(tip);
+                            });
+                        });
+                }
+            }
+        }
 
         // ------- status bar -------
         self.status_bar(ctx);
@@ -1280,10 +1478,6 @@ impl eframe::App for MdbijouApp {
 
 impl MdbijouApp {
     fn show_preview(&mut self, ui: &mut egui::Ui) {
-        if self.need_reparse {
-            self.doc.reparse();
-            self.need_reparse = false;
-        }
         let theme = self.theme().clone();
         // Responsive reading column (UI-MD-002): never grow beyond the window,
         // keep a stable small gutter on narrow windows, center on wide ones.
@@ -1291,6 +1485,7 @@ impl MdbijouApp {
         let effective = self.cfg.content_width.min(avail - 2.0 * 12.0);
         let pad = ((avail - effective) * 0.5).max(12.0);
 
+        let toc_entries = self.toc_entries.clone();
         let mut rctx = RenderCtx::new(
             &theme,
             &mut *self.hl,
@@ -1300,6 +1495,7 @@ impl MdbijouApp {
             self.cfg.line_height,
             Metrics::scaled(ui.ctx().pixels_per_point()),
         );
+        rctx.toc_entries = toc_entries;
 
         // Vertically center the document when it is shorter than the
         // viewport; taller documents stay top-aligned and scrollable. The
@@ -1329,9 +1525,90 @@ impl MdbijouApp {
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(content_h_id, measured.max(0.0)));
             });
+        self.heading_anchors = std::mem::take(&mut rctx.heading_anchors);
+    }
+
+    /// The TOC list, shared by the wide-window side panel and the narrow-window
+    /// drawer. Rows are indented by heading level, truncated with an ellipsis,
+    /// and clickable to scroll the preview to the heading.
+    fn show_toc_panel(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme().clone();
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
+        let entries = std::mem::take(&mut self.toc_entries);
+        if entries.is_empty() {
+            ui.add_space(8.0);
+            ui.label(RichText::new("无标题").size(12.0).color(muted));
+            self.toc_entries = entries;
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for entry in &entries {
+                    let indent = (entry.level.saturating_sub(1)) as f32 * 14.0;
+                    let avail = ui.available_width();
+                    let max_w = (avail - indent - 12.0).max(12.0);
+                    let text = fit_combo_text(ui, &entry.title, max_w);
+                    let row_h = 24.0;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(avail, row_h), egui::Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(5),
+                            theme.c.code_bg,
+                        );
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let color = if resp.hovered() { fg } else { muted };
+                    let font = egui::FontId::proportional(12.0);
+                    // Ink-optical vertical centering (AGENTS.md): the CJK galley
+                    // box carries a tall ascent, so geometric centering would
+                    // push the glyphs up.
+                    let galley =
+                        ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color));
+                    let mut shift = egui::Vec2::ZERO;
+                    if let Some(placed) = galley.rows.first() {
+                        let ink = placed.row.visuals.mesh_bounds;
+                        if ink.is_finite() && ink.width() > 0.0 && ink.height() > 0.0 {
+                            let ink_center = placed.pos + ink.center().to_vec2();
+                            shift = galley.rect.center() - ink_center;
+                        }
+                    }
+                    let y = rect.center().y - galley.size().y / 2.0 + shift.y;
+                    ui.painter()
+                        .galley(egui::pos2(rect.left() + indent + 4.0, y), galley, color);
+                    if resp.clicked() {
+                        self.pending_toc_anchor = Some(entry.anchor.clone());
+                    }
+                }
+            });
+        self.toc_entries = entries;
     }
 
     fn show_editor(&mut self, ui: &mut egui::Ui) {
+        if let Some(line) = self.pending_editor_line.take() {
+            let char_idx: usize = self
+                .doc
+                .text
+                .lines()
+                .take(line)
+                .map(|l| l.chars().count() + 1)
+                .sum();
+            let te_id = ui.id().with("md_editor_source");
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                let cc = egui::text::CCursor::new(char_idx);
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+                ui.ctx().request_repaint();
+            } else {
+                self.pending_editor_line = Some(line);
+            }
+        }
         let theme = self.theme().clone();
         let mut editor = Editor::new(&self.cfg, &theme);
         let res = editor.show(ui, &mut self.doc, &mut *self.hl);
@@ -1465,6 +1742,55 @@ impl MdbijouApp {
             .clone();
         self.switch_theme(&next);
     }
+}
+
+#[allow(dead_code)]
+fn find_heading_line(text: &str, title: &str) -> Option<usize> {
+    let title_trim = title.trim();
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let after_hash = trimmed.trim_start_matches('#').trim_start();
+        if after_hash == title_trim
+            || after_hash.contains(title_trim)
+            || title_trim.contains(after_hash)
+        {
+            return Some(idx);
+        }
+    }
+    text.lines()
+        .enumerate()
+        .find(|(_, l)| l.contains(title_trim))
+        .map(|(i, _)| i)
+}
+
+fn find_heading_line_by_anchor(text: &str, anchor: &str) -> Option<usize> {
+    use std::collections::HashMap;
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let after_hash = trimmed.trim_start_matches('#').trim_start();
+        if after_hash.is_empty() {
+            continue;
+        }
+        let slug = crate::toc::slugify(after_hash);
+        let count = used.entry(slug.clone()).or_insert(0);
+        *count += 1;
+        let cur_anchor = if *count == 1 {
+            slug
+        } else {
+            format!("{slug}-{}", *count)
+        };
+        if cur_anchor == anchor {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 fn base_dir_for(doc: &Document) -> PathBuf {

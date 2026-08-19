@@ -184,7 +184,7 @@ impl<'a> Editor<'a> {
 
                     ui.style_mut().visuals.override_text_color = Some(fg);
                     ui.style_mut().visuals.selection.bg_fill = selection;
-                    ui.style_mut().visuals.selection.stroke = Stroke::new(1.0, selection);
+                    ui.style_mut().visuals.selection.stroke = Stroke::new(1.0, fg);
 
                     let ctx2 = ui.ctx().clone();
                     let mut layouter = |ui: &Ui,
@@ -382,4 +382,49 @@ fn append_span(
             ..Default::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job_text(input: &str, highlight_on: bool) -> String {
+        let th = crate::theme::builtin("github-light").expect("builtin theme");
+        let mut hl = crate::highlight::new_highlighter(&th);
+        let job = editor_job(
+            input,
+            hl.as_mut(),
+            th.c.foreground,
+            FontId::monospace(14.0),
+            20.0,
+            4,
+            highlight_on,
+            800.0,
+        );
+        job.text
+    }
+
+    #[test]
+    fn editor_job_preserves_fullwidth_punctuation_markdown() {
+        let input = "你好，世界！这是测试（中文）【标点】《引号》“双引”‘单引’。；：、？";
+        assert_eq!(job_text(input, true), input);
+    }
+
+    #[test]
+    fn editor_job_preserves_fullwidth_punctuation_plain() {
+        let input = "，。！？（）【】《》“”''；：、";
+        assert_eq!(job_text(input, false), input);
+    }
+
+    #[test]
+    fn editor_job_preserves_fullwidth_in_fenced_code() {
+        let input = "```rust\nlet s = \"你好，世界！\";\n```";
+        assert_eq!(job_text(input, true), input);
+    }
+
+    #[test]
+    fn editor_job_preserves_fullwidth_across_multiple_lines() {
+        let input = "第一行，标点！\n第二行（中文）？\n第三行《引号》";
+        assert_eq!(job_text(input, true), input);
+    }
 }
