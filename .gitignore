@@ -16,3 +16,6 @@
 
 # Packaging output
 /dist/
+
+.agents/
+skills-lock.json
