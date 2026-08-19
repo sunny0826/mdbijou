@@ -4,6 +4,13 @@
 
 `mdbijou` is a Rust 2021 native Markdown reader/editor for macOS. The binary entry point is `src/main.rs`; keep application state and keyboard/file workflows in `src/app.rs`. Parsing belongs in `src/document.rs`, preview rendering in `src/render.rs`, editing and syntax highlighting in `src/editor.rs` and `src/highlight.rs`, image loading/caching in `src/images.rs`, and reusable theme, configuration, and font behavior in their matching modules. Shell helpers are in `scripts/`, while `sample.md` is the local smoke-test fixture. Generated output stays under `target/` and must not be committed. The `docs/` directory is local-only scratch space: it is ignored by git and must not be used as a source of reference or authority for code, behavior, or decisions.
 
+## Local Skills
+
+- `skills/changelog-release-notes/SKILL.md` — use before editing
+  `CHANGELOG.md`, release notes, or PR descriptions that summarize
+  release-visible work. Always check the latest shipped beta and add PR +
+  GitHub author credit for every PR-derived changelog item.
+
 ## Build, Test, and Development Commands
 
 Rust 1.85+ and `just` are the expected tools.
@@ -39,3 +46,17 @@ Unit tests live beside the implementation in `#[cfg(test)] mod tests` (for examp
 ## Commit & Pull Request Guidelines
 
 History currently contains only an initial descriptive commit, so no strict convention is established. Use concise, imperative subjects such as `Fix relative image resolution`, and keep each commit scoped to one concern. All git commit messages and pull request titles/descriptions must be written in English. Pull requests should explain the user-visible change, list validation performed, link relevant issues, and include screenshots for rendering, theme, or editor UI changes. Call out feature-flag, platform, binary-size, or startup-time effects explicitly.
+
+## Branching
+
+- `main` — stable
+- Feature branches: `feat/<short-name>`
+- Fix branches: `fix/<short-name>`
+
+## Postmortems
+
+When solving a non-trivial bug or issue, create `postmortem/YYYY-MM-DD-title.md` with:
+- What happened
+- Root cause
+- Fix applied
+- What we learned

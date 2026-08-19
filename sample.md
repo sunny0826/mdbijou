@@ -1,71 +1,71 @@
-# mdbijou 示例（中文测试）
+# Sample
 
-一个**简单**的 Markdown 阅读器与*编辑器*，支持 ~~删除线~~ 与语法高亮。
+A **simple** Markdown reader and *editor* with ~~strikethrough~~ and syntax highlighting.
 
-## 列表
+## Lists
 
-- 第一项
-- 第二项
-  1. 嵌套有序
-  2. 继续
+- First item
+- Second item
+  1. Nested ordered
+  2. Continue
 
-- [x] 已完成任务
-- [ ] 待办任务
+- [x] Completed task
+- [ ] Pending task
 
-## 代码块（Rust）
+## Code Block (Rust)
 
 ```rust
 fn main() {
     let name = "mdbijou";
-    println!("Hello, {name}!"); // 注释
+    println!("Hello, {name}!"); // comment
     for i in 0..3 {
         println!("{i}");
     }
 }
 ```
 
-## 引用
+## Blockquote
 
-> 这是引用块内容。
-> 多行引用测试中文排版。
+> This is a blockquote.
+> Multi-line quote with English typesetting.
 
-## 表格
+## Table
 
-| 功能 | 状态 | 优先级 |
-| --- | --- | --- |
-| 渲染 | ✅ | P0 |
-| 编辑器 | ✅ | P0 |
+| Feature   | Status | Priority |
+| --------- | ------ | -------- |
+| Rendering | ✅     | P0       |
+| Editor    | ✅     | P0       |
 
-## 链接
+## Links
 
-访问 [egui 官网](https://www.egui.rs) 和 [mdbijou](/local/path)。
+Visit [mdbijou](https://github.com/sunny0826/mdbijou).
 
 ---
 
-正文结束。
+End of body.
 
-## HTML 与图片
+## HTML & Images
 
-这是一个 HTML 段落：<span style="color: red">红色文字</span> 与 <b>加粗</b>。
+This is an HTML paragraph: <span style="color: red">red text</span> and <b>bold</b>.
 
 <div>
-  <p>块级 HTML 内容（仅作为文本显示，不执行）。</p>
+  <p>Block-level HTML content (rendered as text only, not executed).</p>
 </div>
 
-![远程示例图片](https://picsum.photos/400/200)
+![Remote sample image](https://picsum.photos/400/200)
 
-## Mermaid 示例
+## Mermaid Example
 
 ```mermaid
 graph TD
-  A[开始] --> B{条件判断}
-  B -->|是| C(处理逻辑)
-  B -->|否| D[结束]
+  A[Start] --> B{Condition?}
+  B -->|Yes| C(Process)
+  B -->|No| D[End]
   C --> D
 ```
 
 ```mermaid
 flowchart LR
-  用户 --> 前端((Web)) --> 后端{API}
-  后端 --> 数据库[(存储)]
+  User --> Frontend((Web)) --> Backend{API}
+  Backend --> Database[(Storage)]
 ```
