@@ -22,6 +22,8 @@ pub struct Config {
     pub tab_size: usize,
     pub auto_save: bool,
     pub show_status_bar: bool,
+    /// Show the table-of-contents sidebar (wide windows) / drawer (narrow).
+    pub show_toc: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -48,6 +50,7 @@ impl Default for Config {
             tab_size: 4,
             auto_save: false,
             show_status_bar: true,
+            show_toc: false,
         }
     }
 }

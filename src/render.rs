@@ -22,6 +22,16 @@ pub struct RenderCtx<'a> {
     pub font_size: f32,
     pub line_height: f32,
     pub metrics: Metrics,
+    /// Headings rendered this pass, in document order: (TOC anchor, on-screen
+    /// rect). Populated when `toc_entries` is non-empty (i.e. the TOC panel is
+    /// active); the preview side panel uses it to scroll to a heading.
+    pub heading_anchors: Vec<(String, egui::Rect)>,
+    /// TOC entries for the document being rendered, in document order. The
+    /// heading branch consumes them with a cursor so anchors match `toc::extract`
+    /// exactly even though rendering and extraction run separately.
+    pub toc_entries: Vec<crate::toc::TocEntry>,
+    /// Cursor into `toc_entries` for the next heading encountered.
+    pub toc_cursor: usize,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -43,6 +53,9 @@ impl<'a> RenderCtx<'a> {
             font_size,
             line_height,
             metrics,
+            heading_anchors: Vec::new(),
+            toc_entries: Vec::new(),
+            toc_cursor: 0,
         }
     }
 
@@ -71,6 +84,8 @@ impl<'a> RenderCtx<'a> {
 
 /// Render the whole document into `ui` (typical scroll area).
 pub fn render_document(ui: &mut Ui, doc: &crate::document::Document, ctx: &mut RenderCtx) {
+    ctx.heading_anchors.clear();
+    ctx.toc_cursor = 0;
     render_blocks(ui, &doc.blocks, ctx, 0);
 }
 
@@ -82,13 +97,24 @@ pub fn render_blocks(ui: &mut Ui, blocks: &[Block], ctx: &mut RenderCtx, depth: 
 
 pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usize) {
     match block {
-        Block::Heading { level, inlines } => {
+        Block::Heading {
+            level,
+            inlines,
+            align,
+        } => {
             let size = ctx.heading_size(*level);
             let color = ctx.theme.c.heading;
             let (job, links, strikes) =
                 build_inline_job(inlines, ctx, color, FontId::proportional(size));
             ui.add_space(if *level <= 2 { 14.0 } else { 9.0 });
-            paint_job(ui, job, links, strikes, color);
+            let rect = paint_job(ui, job, links, strikes, color, *align);
+            // Record the heading's on-screen rect under its TOC anchor so the
+            // TOC panel can scroll the preview to it. Entries are consumed in
+            // document order, matching `toc::extract`'s traversal.
+            if let Some(entry) = ctx.toc_entries.get(ctx.toc_cursor) {
+                ctx.heading_anchors.push((entry.anchor.clone(), rect));
+            }
+            ctx.toc_cursor += 1;
             if *level <= 2 {
                 let (rect, _) = ui.allocate_exact_size(
                     vec2(ui.available_width().min(ctx.content_width), 2.0),
@@ -98,17 +124,23 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             }
             ui.add_space(5.0);
         }
-        Block::Paragraph { inlines } => {
+        Block::Paragraph { inlines, align } => {
             ui.add_space(5.0);
             // Standalone image paragraph -> real image block.
             if matches!(inlines.as_slice(), [Inline::Image { .. }]) {
-                if let Inline::Image { src, alt } = &inlines[0] {
-                    render_image(ui, src, alt, ctx);
+                if let Inline::Image { src, alt, width } = &inlines[0] {
+                    if *align == Align::Center {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            render_image(ui, src, alt, *width, ctx);
+                        });
+                    } else {
+                        render_image(ui, src, alt, *width, ctx);
+                    }
                 }
             } else {
                 let (job, links, strikes) =
                     build_inline_job(inlines, ctx, ctx.theme.c.foreground, ctx.body_font());
-                paint_job(ui, job, links, strikes, ctx.theme.c.foreground);
+                paint_job(ui, job, links, strikes, ctx.theme.c.foreground, *align);
             }
             ui.add_space(5.0);
         }
@@ -159,27 +191,30 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             ui.painter().rect_filled(rect, 0.0, ctx.theme.c.hr);
             ui.add_space(10.0);
         }
-        Block::Html(raw) => {
-            ui.add_space(6.0);
-            // Render HTML inertly: extract the text content (never execute).
-            let text = html_text(raw);
-            egui::Frame::new()
-                .fill(ctx.theme.c.code_bg)
-                .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-                .corner_radius(ctx.metrics.radius_sm)
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new("HTML").small().color(ctx.theme.c.muted));
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(text)
-                            .size(ctx.font_size)
-                            .color(ctx.theme.c.foreground),
-                    );
-                });
-            ui.add_space(6.0);
-        }
+        Block::Html(raw) => match crate::html::html_blocks(raw) {
+            Some(blocks) => render_blocks(ui, &blocks, ctx, depth),
+            None => {
+                ui.add_space(6.0);
+                // Render HTML inertly: extract the text content (never execute).
+                let text = html_text(raw);
+                egui::Frame::new()
+                    .fill(ctx.theme.c.code_bg)
+                    .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
+                    .corner_radius(ctx.metrics.radius_sm)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(RichText::new("HTML").small().color(ctx.theme.c.muted));
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(text)
+                                .size(ctx.font_size)
+                                .color(ctx.theme.c.foreground),
+                        );
+                    });
+                ui.add_space(6.0);
+            }
+        },
         Block::Footnote { label, blocks } => {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -367,12 +402,20 @@ fn append_inline(
             append_text(job, offset, &format!("🖼 {alt}"), &mf, line_h);
         }
         Inline::InlineHtml(s) => {
-            let mf = Fmt {
-                color: ctx.theme.c.code_fg,
-                font: FontId::monospace(f.font.size - 1.0),
-                ..f.clone()
-            };
-            append_text(job, offset, s, &mf, line_h);
+            // Convert whitelisted inline HTML to styled inlines; degrade to
+            // monospace text when nothing renderable remains.
+            if let Some(inlines) = crate::html::html_inlines(s) {
+                for inl in &inlines {
+                    append_inline(job, links, strikes, offset, inl, ctx, f);
+                }
+            } else {
+                let mf = Fmt {
+                    color: ctx.theme.c.code_fg,
+                    font: FontId::monospace(f.font.size - 1.0),
+                    ..f.clone()
+                };
+                append_text(job, offset, s, &mf, line_h);
+            }
         }
         Inline::Math(s) => {
             let mf = Fmt {
@@ -394,19 +437,32 @@ fn append_inline(
 }
 
 /// Layout and paint a rich-text job, wiring up clickable link spans and
-/// manually-drawn strikethrough lines.
+/// manually-drawn strikethrough lines. `align` shifts single-line jobs
+/// horizontally (wrapped text stays left-aligned within the block). Returns
+/// the on-screen rect of the painted text.
 fn paint_job(
     ui: &mut Ui,
     mut job: LayoutJob,
     links: Vec<LinkSpan>,
     strikes: Vec<StrikeSpan>,
     default: Color32,
-) {
+    align: Align,
+) -> Rect {
     let wrap_width = ui.available_width().max(20.0);
     job.wrap.max_width = wrap_width;
     let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
-    ui.painter().galley(rect.min, galley.clone(), default);
+    let alloc_w = match align {
+        Align::Center | Align::Right => wrap_width,
+        _ => galley.size().x,
+    };
+    let (rect, _) = ui.allocate_exact_size(vec2(alloc_w, galley.size().y), Sense::hover());
+    let offset = match align {
+        Align::Center => ((alloc_w - galley.size().x) / 2.0).max(0.0),
+        Align::Right => (alloc_w - galley.size().x).max(0.0),
+        _ => 0.0,
+    };
+    ui.painter()
+        .galley(rect.min + vec2(offset, 0.0), galley.clone(), default);
 
     // Strikethrough: a line through the *optical* middle of the glyphs, i.e.
     // the center of the row's ink bounds (`mesh_bounds` is the union of the
@@ -434,8 +490,8 @@ fn paint_job(
                 if s >= e {
                     continue;
                 }
-                let sx = row_glyph_x(placed, s - row_start, rect.min.x);
-                let ex = row_glyph_x(placed, e - row_start, rect.min.x);
+                let sx = row_glyph_x(placed, s - row_start, rect.min.x + offset);
+                let ex = row_glyph_x(placed, e - row_start, rect.min.x + offset);
                 ui.painter().line_segment(
                     [pos2(sx, strike_y), pos2(ex, strike_y)],
                     Stroke::new((st.size / 12.0).max(1.0), st.color),
@@ -454,8 +510,8 @@ fn paint_job(
         // A union rect; for links that wrap this may span a couple of rows, but
         // it keeps links reliably clickable.
         let hit = Rect::from_min_max(
-            pos2(rect.min.x + s.min.x, rect.min.y + s.min.y),
-            pos2(rect.min.x + e.max.x, rect.min.y + e.max.y),
+            pos2(rect.min.x + offset + s.min.x, rect.min.y + s.min.y),
+            pos2(rect.min.x + offset + e.max.x, rect.min.y + e.max.y),
         );
         let id = ui.id().with(("link", &link.url, link.start));
         let resp = ui.interact(hit, id, Sense::click());
@@ -466,6 +522,7 @@ fn paint_job(
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
     }
+    rect
 }
 
 // ---------------------------------------------------------------------------
@@ -807,13 +864,17 @@ fn paint_table_row(
 // Images (UI-MD-010)
 // ---------------------------------------------------------------------------
 
-fn render_image(ui: &mut Ui, src: &str, alt: &str, ctx: &mut RenderCtx) {
+fn render_image(ui: &mut Ui, src: &str, alt: &str, width: Option<f32>, ctx: &mut RenderCtx) {
     let avail = ui.available_width().max(20.0);
     let max_w = avail.min(ctx.content_width);
     match ctx.images.texture_for(ui.ctx(), src) {
         Some((tex, natural)) => {
             let ratio = (natural.y / natural.x.max(1.0)).clamp(0.1, 2.0);
-            let w = natural.x.min(max_w);
+            let w = match width {
+                // HTML `width` attribute wins, capped at the content column.
+                Some(w) => w.min(max_w).max(1.0),
+                None => natural.x.min(max_w),
+            };
             let h = (w * ratio).max(1.0);
             let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
             // Paint a placeholder/background so broken textures show clearly.
@@ -881,7 +942,7 @@ fn render_image(ui: &mut Ui, src: &str, alt: &str, ctx: &mut RenderCtx) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn inline_text(inlines: &[Inline]) -> String {
+pub(crate) fn inline_text(inlines: &[Inline]) -> String {
     inlines.iter().filter_map(inline_leaf).collect()
 }
 

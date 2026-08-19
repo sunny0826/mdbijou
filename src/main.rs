@@ -15,12 +15,14 @@ mod document;
 mod editor;
 mod fonts;
 mod highlight;
+mod html;
 mod images;
 mod install;
 mod macos;
 mod mermaid;
 mod render;
 mod theme;
+mod toc;
 
 use config::View;
 

@@ -16,9 +16,13 @@ pub enum Block {
     Heading {
         level: u8,
         inlines: Vec<Inline>,
+        /// Horizontal alignment (from HTML `align`; markdown yields `None`).
+        align: Align,
     },
     Paragraph {
         inlines: Vec<Inline>,
+        /// Horizontal alignment (from HTML `align`; markdown yields `None`).
+        align: Align,
     },
     CodeBlock {
         lang: Option<String>,
@@ -75,6 +79,8 @@ pub enum Inline {
     Image {
         src: String,
         alt: String,
+        /// Optional pixel width from an HTML `width` attribute (markdown `None`).
+        width: Option<f32>,
     },
     SoftBreak,
     HardBreak,
@@ -356,11 +362,18 @@ fn start_tag(stack: &mut Vec<Ctx>, tag: Tag<'_>) {
 fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
     match end {
         TagEnd::Heading(_) => pop_into(stack, out, |c| match c {
-            Ctx::Heading { level, inlines } => Some(Block::Heading { level, inlines }),
+            Ctx::Heading { level, inlines } => Some(Block::Heading {
+                level,
+                inlines,
+                align: Align::None,
+            }),
             _ => None,
         }),
         TagEnd::Paragraph => pop_into(stack, out, |c| match c {
-            Ctx::Paragraph { inlines } => Some(Block::Paragraph { inlines }),
+            Ctx::Paragraph { inlines } => Some(Block::Paragraph {
+                inlines,
+                align: Align::None,
+            }),
             _ => None,
         }),
         TagEnd::CodeBlock => pop_into(stack, out, |c| match c {
@@ -419,7 +432,10 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
             {
                 if let Some(p) = cur_para {
                     if !p.is_empty() {
-                        blocks.push(Block::Paragraph { inlines: p });
+                        blocks.push(Block::Paragraph {
+                            inlines: p,
+                            align: Align::None,
+                        });
                     }
                 }
                 // Attach to the enclosing list.
@@ -479,7 +495,10 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
             {
                 if let Some(p) = cur_para {
                     if !p.is_empty() {
-                        blocks.push(Block::Paragraph { inlines: p });
+                        blocks.push(Block::Paragraph {
+                            inlines: p,
+                            align: Align::None,
+                        });
                     }
                 }
                 emit_block(stack, out, Block::Footnote { label, blocks });
@@ -509,7 +528,11 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
             _ => Inline::Text(String::new()),
         }),
         TagEnd::Image => finish_inline(stack, out, |f| match f {
-            Ctx::Image { src, alt } => Inline::Image { src, alt },
+            Ctx::Image { src, alt } => Inline::Image {
+                src,
+                alt,
+                width: None,
+            },
             _ => Inline::Text(String::new()),
         }),
         // Safe degradation for unsupported tags (already pushed no frame).
@@ -575,7 +598,10 @@ fn flush_item_para(stack: &mut [Ctx]) {
         }) => {
             if let Some(p) = cur_para.take() {
                 if !p.is_empty() {
-                    blocks.push(Block::Paragraph { inlines: p });
+                    blocks.push(Block::Paragraph {
+                        inlines: p,
+                        align: Align::None,
+                    });
                 }
             }
         }
@@ -584,7 +610,10 @@ fn flush_item_para(stack: &mut [Ctx]) {
         }) => {
             if let Some(p) = cur_para.take() {
                 if !p.is_empty() {
-                    blocks.push(Block::Paragraph { inlines: p });
+                    blocks.push(Block::Paragraph {
+                        inlines: p,
+                        align: Align::None,
+                    });
                 }
             }
         }
@@ -600,7 +629,10 @@ fn emit_block(stack: &mut [Ctx], out: &mut Vec<Block>, b: Block) {
         }) => {
             if let Some(p) = cur_para.take() {
                 if !p.is_empty() {
-                    blocks.push(Block::Paragraph { inlines: p });
+                    blocks.push(Block::Paragraph {
+                        inlines: p,
+                        align: Align::None,
+                    });
                 }
             }
             blocks.push(b);
@@ -610,7 +642,10 @@ fn emit_block(stack: &mut [Ctx], out: &mut Vec<Block>, b: Block) {
         }) => {
             if let Some(p) = cur_para.take() {
                 if !p.is_empty() {
-                    blocks.push(Block::Paragraph { inlines: p });
+                    blocks.push(Block::Paragraph {
+                        inlines: p,
+                        align: Align::None,
+                    });
                 }
             }
             blocks.push(b);
@@ -667,7 +702,10 @@ fn sink_inline(stack: &mut [Ctx], out: &mut Vec<Block>, inl: Inline) {
         }
     }
     if !hit {
-        out.push(Block::Paragraph { inlines: vec![inl] });
+        out.push(Block::Paragraph {
+            inlines: vec![inl],
+            align: Align::None,
+        });
     }
 }
 
@@ -714,7 +752,7 @@ mod tests {
         blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Paragraph { inlines } => Some(inline_plain_all(inlines)),
+                Block::Paragraph { inlines, .. } => Some(inline_plain_all(inlines)),
                 _ => None,
             })
             .collect()
@@ -742,7 +780,7 @@ mod tests {
     fn preserves_strong_emphasis_strike_and_code() {
         let blocks = parse_md("**bold** *em* ~~strike~~ `code`");
         assert_eq!(blocks.len(), 1);
-        let Block::Paragraph { inlines } = &blocks[0] else {
+        let Block::Paragraph { inlines, .. } = &blocks[0] else {
             panic!("expected paragraph")
         };
         assert!(inlines.iter().any(|i| matches!(i, Inline::Strong(_))));
@@ -911,22 +949,22 @@ mod tests {
     #[test]
     fn captures_links_images_and_breaks() {
         let blocks = parse_md("[link](https://egui.rs) ![alt](img.png)  \nnext line");
-        let Block::Paragraph { inlines } = &blocks[0] else {
+        let Block::Paragraph { inlines, .. } = &blocks[0] else {
             panic!()
         };
         assert!(inlines
             .iter()
             .any(|i| matches!(i, Inline::Link { dest, .. } if dest == "https://egui.rs")));
-        assert!(inlines
-            .iter()
-            .any(|i| matches!(i, Inline::Image { src, alt } if src == "img.png" && alt == "alt")));
+        assert!(inlines.iter().any(
+            |i| matches!(i, Inline::Image { src, alt, .. } if src == "img.png" && alt == "alt")
+        ));
         assert!(inlines.contains(&Inline::HardBreak));
     }
 
     #[test]
     fn soft_break_stays_soft_and_hard_break_is_hard() {
         let md = "one\ntwo  \nthree";
-        let Block::Paragraph { inlines } = &parse_md(md)[0] else {
+        let Block::Paragraph { inlines, .. } = &parse_md(md)[0] else {
             panic!()
         };
         assert!(inlines.contains(&Inline::SoftBreak));
@@ -940,7 +978,7 @@ mod tests {
         let blocks = parse_md(md);
         // Inline HTML is kept as an InlineHtml segment.
         assert!(blocks.iter().any(|b| match b {
-            Block::Paragraph { inlines } =>
+            Block::Paragraph { inlines, .. } =>
                 inlines.iter().any(|i| matches!(i, Inline::InlineHtml(_))),
             _ => false,
         }));
