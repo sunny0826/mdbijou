@@ -10,7 +10,7 @@ use crate::highlight::{self, Highlighter};
 use crate::images::ImageStore;
 use crate::install;
 use crate::render::RenderCtx;
-use crate::theme::{Theme, ThemeRegistry};
+use crate::theme::{Metrics, Theme, ThemeRegistry};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_phosphor::regular;
@@ -36,6 +36,8 @@ pub struct MdbijouApp {
     show_settings: bool,
     /// Result of the last CLI-install attempt, shown in the settings page.
     cli_status: Option<install::InstallResult>,
+    /// 1-based cursor (line, column) in edit mode, for the status bar.
+    cursor: Option<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -101,6 +103,7 @@ impl MdbijouApp {
             feedback: None,
             show_settings: false,
             cli_status: None,
+            cursor: None,
         }
     }
 
@@ -108,6 +111,10 @@ impl MdbijouApp {
         self.registry
             .get(&self.theme_id)
             .unwrap_or(&self.registry.themes[0])
+    }
+
+    fn metrics(&self, ctx: &egui::Context) -> Metrics {
+        Metrics::scaled(ctx.pixels_per_point())
     }
 
     fn rebuild_highlighter(&mut self) {
@@ -156,9 +163,9 @@ impl MdbijouApp {
         let ok = config::atomic_write(&path, self.doc.text.as_bytes()).is_ok();
         if ok {
             self.doc.dirty = false;
-            self.flash("已保存", Color32::from_rgb(70, 170, 90));
+            self.flash("已保存", self.theme().c.success);
         } else {
-            self.flash("保存失败", Color32::from_rgb(220, 90, 70));
+            self.flash("保存失败", self.theme().c.error);
         }
         ok
     }
@@ -173,11 +180,11 @@ impl MdbijouApp {
             if ok {
                 self.doc.path = Some(path);
                 self.doc.dirty = false;
-                self.flash("已保存", Color32::from_rgb(70, 170, 90));
+                self.flash("已保存", self.theme().c.success);
                 return true;
             }
         }
-        self.flash("保存取消或失败", Color32::from_rgb(220, 90, 70));
+        self.flash("保存取消或失败", self.theme().c.error);
         false
     }
 
@@ -428,7 +435,8 @@ impl MdbijouApp {
     fn view_switch(&mut self, ui: &mut egui::Ui, theme: &Theme) -> bool {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(92.0, 22.0), egui::Sense::hover());
         let painter = ui.painter();
-        let rounding = egui::CornerRadius::same(11);
+        let metrics = self.metrics(ui.ctx());
+        let rounding = egui::CornerRadius::same(metrics.radius_lg as u8);
         painter.rect_filled(rect, rounding, theme.c.code_bg);
         painter.rect_stroke(
             rect,
@@ -444,7 +452,7 @@ impl MdbijouApp {
             egui::Rect::from_min_max(egui::pos2(rect.min.x + half, rect.min.y), rect.max);
         let is_preview = self.view == View::Preview;
         let sel_rect = if is_preview { preview_rect } else { edit_rect };
-        let sel_rounding = egui::CornerRadius::same(9);
+        let sel_rounding = egui::CornerRadius::same(metrics.radius_md as u8);
         painter.rect_filled(sel_rect.shrink(2.0), sel_rounding, theme.c.background);
         painter.rect_stroke(
             sel_rect.shrink(2.0),
@@ -481,7 +489,12 @@ impl MdbijouApp {
         let hovered = preview_resp.hovered() || edit_resp.hovered();
         if hovered {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            preview_resp.clone().on_hover_text("⌘E");
+            let hint = if is_preview {
+                "切换到编辑 (⌘E)"
+            } else {
+                "切换到预览 (⌘E)"
+            };
+            preview_resp.clone().on_hover_text(hint);
         }
         (preview_resp.clicked() && !is_preview) || (edit_resp.clicked() && is_preview)
     }
@@ -502,6 +515,7 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
+        let metrics = self.metrics(ctx);
         let themes: Vec<(String, String)> = self
             .registry
             .themes
@@ -539,7 +553,7 @@ impl MdbijouApp {
                 ui.set_opacity(fade);
                 egui::Frame::new()
                     .fill(theme.c.background)
-                    .corner_radius(10.0)
+                    .corner_radius(metrics.radius_lg)
                     .stroke(egui::Stroke::new(1.0, theme.c.hr))
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 8],
@@ -605,7 +619,7 @@ impl MdbijouApp {
                                             fg.gamma_multiply(0.15)
                                         },
                                     ))
-                                    .corner_radius(6.0);
+                                    .corner_radius(metrics.radius_sm);
                                     if ui.add(capsule).clicked() {
                                         picked = Some(id.clone());
                                     }
@@ -738,6 +752,9 @@ impl eframe::App for MdbijouApp {
                 }
             });
 
+        // ------- status bar -------
+        self.status_bar(ctx);
+
         // ------- settings page -------
         self.show_settings(ctx);
 
@@ -773,6 +790,7 @@ impl MdbijouApp {
             effective,
             self.cfg.font_size,
             self.cfg.line_height,
+            Metrics::scaled(ui.ctx().pixels_per_point()),
         );
 
         egui::ScrollArea::vertical()
@@ -792,10 +810,130 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let mut editor = Editor::new(&self.cfg, &theme);
         let res = editor.show(ui, &mut self.doc, &mut *self.hl);
+        self.cursor = res.cursor;
         if res.changed {
             self.last_edit_saved = Instant::now();
             self.need_reparse = true;
         }
+    }
+
+    /// Bottom 24px status bar: file path, word/char count, cursor (edit mode),
+    /// save feedback on the left; font size and theme quick switch on the right.
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        if !self.cfg.show_status_bar {
+            return;
+        }
+        let theme = self.theme().clone();
+        let fg = theme.c.foreground;
+        let muted = theme.c.muted;
+        let hairline = self.metrics(ctx).hairline;
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(24.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.c.surface)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
+            .show(ctx, |ui| {
+                let bar = ui.max_rect();
+                ui.painter().hline(
+                    bar.left()..=bar.right(),
+                    bar.top(),
+                    egui::Stroke::new(hairline, theme.c.hr),
+                );
+                ui.horizontal(|ui| {
+                    match &self.doc.path {
+                        Some(p) => {
+                            let resp = ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(p.display().to_string())
+                                            .size(11.0)
+                                            .color(muted),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("在 Finder 中显示");
+                            if resp.clicked() {
+                                reveal_in_finder(p);
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("未命名").size(11.0).color(muted));
+                        }
+                    }
+                    let words = self.doc.text.split_whitespace().count();
+                    let chars = self.doc.text.chars().count();
+                    ui.label(
+                        RichText::new(format!("{words} 词 · {chars} 字符"))
+                            .size(11.0)
+                            .color(muted),
+                    );
+                    if self.view == View::Edit {
+                        if let Some((line, col)) = self.cursor {
+                            ui.label(RichText::new(format!("{line}:{col}")).size(11.0).color(fg));
+                        }
+                    }
+                    if let Some((expiry, msg, color)) = &self.feedback {
+                        if *expiry > Instant::now() {
+                            ui.label(RichText::new(msg).size(11.0).color(*color));
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let minus = ui
+                            .add(
+                                egui::Button::new(RichText::new("A-").size(11.0).color(muted))
+                                    .frame(false),
+                            )
+                            .on_hover_text("减小字号");
+                        if minus.clicked() {
+                            self.adjust_font_size(-1.0);
+                        }
+                        let plus = ui
+                            .add(
+                                egui::Button::new(RichText::new("A+").size(11.0).color(muted))
+                                    .frame(false),
+                            )
+                            .on_hover_text("增大字号");
+                        if plus.clicked() {
+                            self.adjust_font_size(1.0);
+                        }
+                        let th = ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(self.theme().name.clone()).size(11.0),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("切换主题");
+                        if th.clicked() {
+                            self.cycle_theme();
+                        }
+                    });
+                });
+            });
+    }
+
+    fn adjust_font_size(&mut self, delta: f32) {
+        let new = (self.cfg.font_size + delta).clamp(12.0, 28.0);
+        if (new - self.cfg.font_size).abs() > 0.01 {
+            self.cfg.font_size = new;
+            config::save(&self.cfg);
+        }
+    }
+
+    fn cycle_theme(&mut self) {
+        let idx = self
+            .registry
+            .themes
+            .iter()
+            .position(|t| t.id == self.theme_id)
+            .unwrap_or(0);
+        let next = self.registry.themes[(idx + 1) % self.registry.themes.len()]
+            .id
+            .clone();
+        self.switch_theme(&next);
     }
 }
 
@@ -805,3 +943,14 @@ fn base_dir_for(doc: &Document) -> PathBuf {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
+
+#[cfg(target_os = "macos")]
+fn reveal_in_finder(path: &std::path::Path) {
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_in_finder(_path: &std::path::Path) {}

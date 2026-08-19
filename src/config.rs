@@ -19,6 +19,7 @@ pub struct Config {
     pub highlight: bool,
     pub tab_size: usize,
     pub auto_save: bool,
+    pub show_status_bar: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -43,6 +44,7 @@ impl Default for Config {
             highlight: true,
             tab_size: 4,
             auto_save: false,
+            show_status_bar: true,
         }
     }
 }

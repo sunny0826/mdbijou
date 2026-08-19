@@ -8,7 +8,7 @@
 use crate::document::{Align, Block, Inline};
 use crate::highlight::{Highlighter, Line};
 use crate::images::ImageStore;
-use crate::theme::Theme;
+use crate::theme::{Metrics, Theme};
 use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{pos2, vec2, Color32, CursorIcon, FontId, Rect, RichText, Sense, Stroke, Ui};
 
@@ -21,6 +21,7 @@ pub struct RenderCtx<'a> {
     pub content_width: f32,
     pub font_size: f32,
     pub line_height: f32,
+    pub metrics: Metrics,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -32,6 +33,7 @@ impl<'a> RenderCtx<'a> {
         content_width: f32,
         font_size: f32,
         line_height: f32,
+        metrics: Metrics,
     ) -> Self {
         Self {
             theme,
@@ -40,6 +42,7 @@ impl<'a> RenderCtx<'a> {
             content_width,
             font_size,
             line_height,
+            metrics,
         }
     }
 
@@ -154,7 +157,7 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             egui::Frame::new()
                 .fill(ctx.theme.c.code_bg)
                 .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-                .corner_radius(3.0)
+                .corner_radius(ctx.metrics.radius_sm)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
@@ -404,7 +407,7 @@ fn render_code_block(ui: &mut Ui, lang: Option<&str>, text: &str, ctx: &mut Rend
     let frame = egui::Frame::new()
         .fill(ctx.theme.c.code_bg)
         .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-        .corner_radius(4.0)
+        .corner_radius(ctx.metrics.radius_sm)
         .inner_margin(egui::Margin::symmetric(12, 8));
     frame.show(ui, |ui| {
         // Fill the whole content column so short code blocks don't shrink.
@@ -775,7 +778,7 @@ fn render_image(ui: &mut Ui, src: &str, alt: &str, ctx: &mut RenderCtx) {
             egui::Frame::new()
                 .fill(ctx.theme.c.image_bg)
                 .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-                .corner_radius(3.0)
+                .corner_radius(ctx.metrics.radius_sm)
                 .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.label(RichText::new(format!("🖼 {state}")).color(fg));
