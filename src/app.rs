@@ -538,7 +538,10 @@ impl MdbijouApp {
 
         egui::Area::new(egui::Id::new("settings_card"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .anchor(
+                egui::Align2::CENTER_CENTER,
+                ctx.content_rect().center() - screen.center(),
+            )
             .show(ctx, |ui| {
                 ui.set_opacity(fade);
                 egui::Frame::new()
@@ -555,25 +558,81 @@ impl MdbijouApp {
                     .show(ui, |ui| {
                         ui.set_width(400.0);
 
-                        // Header: icon + title + close button.
+                        // Header: gear icon + title + close button share one
+                        // fixed-height slot and are each ink-optically centered
+                        // (see AGENTS.md "egui Text Vertical Positioning"):
+                        // the CJK galley box carries PingFang's tall ascent, so
+                        // baseline/geometric centering would push the ink up.
+                        // Every row below uses a fixed-height slot with
+                        // ink-centered content too, so the leading and trailing
+                        // whitespace now roughly match and the content centers
+                        // naturally - no fixed top-padding compensation needed.
+                        let header_h = 22.0;
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(regular::GEAR_SIX).size(15.0).color(muted));
-                            ui.label(RichText::new("设置").size(15.0).strong());
+                            let gear_font = egui::FontId::proportional(15.0);
+                            let title_font = egui::FontId::proportional(15.0);
+                            let title_color = ui.visuals().strong_text_color();
+                            let (gear_w, title_w) = ui.fonts_mut(|f| {
+                                let gear = f.layout_no_wrap(
+                                    regular::GEAR_SIX.to_owned(),
+                                    gear_font.clone(),
+                                    muted,
+                                );
+                                let title = f.layout_no_wrap(
+                                    "设置".to_owned(),
+                                    title_font.clone(),
+                                    title_color,
+                                );
+                                (gear.size().x, title.size().x)
+                            });
+                            let gap = 8.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(gear_w + gap + title_w, header_h),
+                                egui::Sense::hover(),
+                            );
+                            let gear_rect =
+                                egui::Rect::from_min_size(rect.min, egui::vec2(gear_w, header_h));
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                gear_rect,
+                                regular::GEAR_SIX,
+                                gear_font,
+                                muted,
+                            );
+                            let title_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.min.x + gear_w + gap, rect.min.y),
+                                egui::vec2(title_w, header_h),
+                            );
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                title_rect,
+                                "设置",
+                                title_font,
+                                title_color,
+                            );
+
+                            // Close button in the same slot, right-aligned.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new(regular::X).size(13.0).color(muted),
-                                            )
-                                            .frame(false),
-                                        )
-                                        .on_hover_text("关闭 (Esc)")
-                                        .clicked()
-                                    {
+                                    let (close_rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(24.0, header_h),
+                                        egui::Sense::click(),
+                                    );
+                                    if resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    paint_optical_centered_text(
+                                        ui.painter(),
+                                        close_rect,
+                                        regular::X,
+                                        egui::FontId::proportional(13.0),
+                                        muted,
+                                    );
+                                    if resp.clicked() {
                                         close = true;
                                     }
+                                    resp.on_hover_text("关闭 (Esc)");
                                 },
                             );
                         });
@@ -598,41 +657,7 @@ impl MdbijouApp {
                                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                                     for (id, name, chip_accent) in &themes {
                                         let selected = self.theme_id == *id;
-                                        let mut job = egui::text::LayoutJob::default();
-                                        job.append(
-                                            "●  ",
-                                            0.0,
-                                            egui::TextFormat {
-                                                font_id: egui::FontId::proportional(10.0),
-                                                color: *chip_accent,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        job.append(
-                                            name,
-                                            0.0,
-                                            egui::TextFormat {
-                                                font_id: egui::FontId::proportional(12.0),
-                                                color: if selected { fg } else { muted },
-                                                ..Default::default()
-                                            },
-                                        );
-                                        let capsule = egui::Button::new(job)
-                                            .fill(if selected {
-                                                chip_accent.gamma_multiply(0.15)
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            })
-                                            .stroke(egui::Stroke::new(
-                                                1.0,
-                                                if selected {
-                                                    chip_accent.gamma_multiply(0.6)
-                                                } else {
-                                                    fg.gamma_multiply(0.15)
-                                                },
-                                            ))
-                                            .corner_radius(10.0);
-                                        if ui.add(capsule).clicked() {
+                                        if theme_chip(ui, name, *chip_accent, selected, fg, muted) {
                                             picked = Some(id.clone());
                                         }
                                     }
@@ -654,9 +679,9 @@ impl MdbijouApp {
                                     .map(|f| f.name)
                                     .unwrap_or("默认");
                                 let shown = fit_combo_text(ui, current, 130.0);
-                                egui::ComboBox::from_id_salt("body_font")
+                                let combo_resp = egui::ComboBox::from_id_salt("body_font")
                                     .width(170.0)
-                                    .selected_text(RichText::new(shown).size(12.0))
+                                    .selected_text("")
                                     .show_ui(ui, |ui| {
                                         for f in crate::fonts::BODY_FONTS {
                                             if ui
@@ -670,15 +695,29 @@ impl MdbijouApp {
                                             }
                                         }
                                     });
+                                let btn_rect = combo_resp.response.rect;
+                                let text_rect = btn_rect.shrink2(egui::vec2(8.0, 4.0));
+                                paint_optical_centered_text(
+                                    ui.painter(),
+                                    text_rect,
+                                    &shown,
+                                    egui::FontId::proportional(12.0),
+                                    ui.visuals().text_color(),
+                                );
+                                if combo_resp.response.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
                             });
                             ui.add_space(6.0);
                             hairline(ui, theme.c.hr);
                             ui.add_space(8.0);
                             settings_row(ui, "正文字号", fg, |ui| {
-                                ui.label(
-                                    RichText::new(format!("{:.1}", self.cfg.font_size))
-                                        .size(12.0)
-                                        .color(muted),
+                                ink_centered_label(
+                                    ui,
+                                    &format!("{:.1}", self.cfg.font_size),
+                                    egui::FontId::proportional(12.0),
+                                    muted,
+                                    SETTINGS_ROW_H,
                                 );
                                 let w = (ui.available_width() - 8.0).max(60.0);
                                 if ui
@@ -697,10 +736,12 @@ impl MdbijouApp {
                             hairline(ui, theme.c.hr);
                             ui.add_space(8.0);
                             settings_row(ui, "编辑器字号", fg, |ui| {
-                                ui.label(
-                                    RichText::new(format!("{:.1}", self.cfg.editor_font_size))
-                                        .size(12.0)
-                                        .color(muted),
+                                ink_centered_label(
+                                    ui,
+                                    &format!("{:.1}", self.cfg.editor_font_size),
+                                    egui::FontId::proportional(12.0),
+                                    muted,
+                                    SETTINGS_ROW_H,
                                 );
                                 let w = (ui.available_width() - 8.0).max(60.0);
                                 if ui
@@ -726,10 +767,11 @@ impl MdbijouApp {
                         ui.add_space(6.0);
                         settings_group(ui, &theme, |ui| {
                             ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("把 mdbijou 安装为 `mdb` 命令，加入你的 PATH。")
-                                    .size(12.0)
-                                    .color(muted),
+                            optical_label(
+                                ui,
+                                "把 mdbijou 安装为 `mdb` 命令，加入你的 PATH。",
+                                egui::FontId::proportional(12.0),
+                                muted,
                             );
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
@@ -739,24 +781,19 @@ impl MdbijouApp {
                                     } else {
                                         (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
                                     };
-                                    ink_centered_label(
-                                        ui,
-                                        &format!("{mark}  {}", res.message),
-                                        egui::FontId::proportional(12.0),
-                                        color,
-                                        26.0,
-                                    );
+                                    cli_status_label(ui, mark, &res.message, color, SETTINGS_ROW_H);
                                 }
-                                ui.with_layout(
+                                let w = ui.available_width();
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(w, SETTINGS_ROW_H),
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.button("安装 CLI 到本地").clicked() {
+                                        if settings_optical_button(ui, "安装 CLI 到本地") {
                                             do_install = true;
                                         }
                                     },
                                 );
                             });
-                            ui.add_space(8.0);
                         });
                     });
             });
@@ -819,14 +856,29 @@ fn paint_optical_centered_text(
 }
 
 /// Muted 12pt section caption with a Phosphor icon, used inside the settings
-/// card.
+/// card. Icon and text are laid out as separate galleys in one fixed-height
+/// slot and each ink-optically centered (`paint_optical_centered_text`), so
+/// the icon never rides high on the CJK galley's tall ascender padding.
 fn settings_section(ui: &mut egui::Ui, icon: &str, text: &str, muted: Color32) {
-    ui.label(
-        RichText::new(format!("{icon}  {text}"))
-            .size(12.0)
-            .strong()
-            .color(muted),
+    let font = egui::FontId::proportional(12.0);
+    let slot_h = 18.0;
+    let gap = 7.0;
+    let (icon_w, text_w) = ui.fonts_mut(|f| {
+        let icon_g = f.layout_no_wrap(icon.to_owned(), font.clone(), muted);
+        let text_g = f.layout_no_wrap(text.to_owned(), font.clone(), muted);
+        (icon_g.size().x, text_g.size().x)
+    });
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(icon_w + gap + text_w, slot_h),
+        egui::Sense::hover(),
     );
+    let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(icon_w, slot_h));
+    paint_optical_centered_text(ui.painter(), icon_rect, icon, font.clone(), muted);
+    let text_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x + icon_w + gap, rect.min.y),
+        egui::vec2(text_w, slot_h),
+    );
+    paint_optical_centered_text(ui.painter(), text_rect, text, font, muted);
 }
 
 /// Grouped-panel container (macOS System Settings style): a rounded, subtly
@@ -858,13 +910,155 @@ fn ink_centered_label(
     paint_optical_centered_text(ui.painter(), rect, text, font, color);
 }
 
-/// One settings row: label on the left, controls right-aligned.
+fn optical_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32) {
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), color));
+    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    paint_optical_centered_text(ui.painter(), rect, text, font, color);
+}
+
+fn cli_status_label(ui: &mut egui::Ui, mark: &str, msg: &str, color: Color32, height: f32) {
+    let font = egui::FontId::proportional(12.0);
+    let gap = 6.0;
+    let (mark_w, msg_w) = ui.fonts_mut(|f| {
+        let a = f.layout_no_wrap(mark.to_owned(), font.clone(), color);
+        let b = f.layout_no_wrap(msg.to_owned(), font.clone(), color);
+        (a.size().x, b.size().x)
+    });
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(mark_w + gap + msg_w, height),
+        egui::Sense::hover(),
+    );
+    let mark_rect = egui::Rect::from_min_size(rect.min, egui::vec2(mark_w, height));
+    paint_optical_centered_text(ui.painter(), mark_rect, mark, font.clone(), color);
+    let msg_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x + mark_w + gap, rect.min.y),
+        egui::vec2(msg_w, height),
+    );
+    paint_optical_centered_text(ui.painter(), msg_rect, msg, font, color);
+}
+
+fn settings_optical_button(ui: &mut egui::Ui, text: &str) -> bool {
+    let font = egui::FontId::proportional(12.0);
+    let pad_x = 10.0;
+    let h = 24.0;
+    let w = ui.fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    }) + pad_x * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let visuals = if resp.is_pointer_button_down_on() {
+        ui.visuals().widgets.active
+    } else if resp.hovered() {
+        ui.visuals().widgets.hovered
+    } else {
+        ui.visuals().widgets.inactive
+    };
+    ui.painter()
+        .rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+    ui.painter().rect_stroke(
+        rect,
+        visuals.corner_radius,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(egui::vec2(pad_x, 0.0));
+    paint_optical_centered_text(ui.painter(), inner, text, font, visuals.fg_stroke.color);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// macOS-style theme capsule: the `●` dot and the theme name are painted as
+/// separate galleys, each ink-optically centered on the pill's vertical
+/// center. Mixing them in one `LayoutJob` baseline-aligns the dot (whose CJK
+/// baseline sits low), leaving it visibly lower than the name.
+fn theme_chip(
+    ui: &mut egui::Ui,
+    name: &str,
+    accent: Color32,
+    selected: bool,
+    fg: Color32,
+    muted: Color32,
+) -> bool {
+    let dot_font = egui::FontId::proportional(10.0);
+    let name_font = egui::FontId::proportional(12.0);
+    let name_color = if selected { fg } else { muted };
+    let (dot_w, name_w) = ui.fonts_mut(|f| {
+        let dot = f.layout_no_wrap("●".to_owned(), dot_font.clone(), accent);
+        let name = f.layout_no_wrap(name.to_owned(), name_font.clone(), name_color);
+        (dot.size().x, name.size().x)
+    });
+    let pad_x = 8.0;
+    let gap = 6.0;
+    let chip_h = 20.0;
+    let chip_w = pad_x * 2.0 + dot_w + gap + name_w;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(chip_w, chip_h), egui::Sense::click());
+    let painter = ui.painter();
+    let rounding = egui::CornerRadius::same(10);
+    painter.rect_filled(
+        rect,
+        rounding,
+        if selected {
+            accent.gamma_multiply(0.15)
+        } else {
+            Color32::TRANSPARENT
+        },
+    );
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(
+            1.0,
+            if selected {
+                accent.gamma_multiply(0.6)
+            } else {
+                fg.gamma_multiply(0.15)
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let dot_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + pad_x, rect.top()),
+        egui::vec2(dot_w, chip_h),
+    );
+    paint_optical_centered_text(painter, dot_rect, "●", dot_font, accent);
+    let name_rect = egui::Rect::from_min_size(
+        egui::pos2(dot_rect.right() + gap, rect.top()),
+        egui::vec2(name_w, chip_h),
+    );
+    paint_optical_centered_text(painter, name_rect, name, name_font, name_color);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// Height of the fixed slot every settings row's label and controls share, so
+/// both sides align on the same visual center line.
+const SETTINGS_ROW_H: f32 = 26.0;
+
+/// One settings row: ink-optically centered label on the left, controls
+/// right-aligned. Both sides live in the same fixed-height slot, so a control
+/// shorter than the row can never pull the label's optical center upward.
 fn settings_row(ui: &mut egui::Ui, label: &str, fg: Color32, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        // Fixed-height slot (matches the tallest control) keeps the label from
-        // sitting high when a taller control later grows the row.
-        ink_centered_label(ui, label, egui::FontId::proportional(13.0), fg, 26.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+        ink_centered_label(
+            ui,
+            label,
+            egui::FontId::proportional(13.0),
+            fg,
+            SETTINGS_ROW_H,
+        );
+        // The right-hand slot is fixed to the same height as the label slot;
+        // `Align::Center` then centers each control on the row's center line.
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(
+            egui::vec2(w, SETTINGS_ROW_H),
+            egui::Layout::right_to_left(egui::Align::Center),
+            add,
+        );
     });
 }
 
