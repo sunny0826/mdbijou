@@ -16,7 +16,7 @@ build:
 check:
     cargo check
 
-# 正式发布构建（体积小、启动快，产物 ~5.3 MB）
+# 正式发布构建（体积小、启动快，产物 ~7.2 MB）
 release:
     cargo build --release
 
