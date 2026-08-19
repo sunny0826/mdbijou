@@ -2,8 +2,8 @@
 # Generates assets/mdbijou.icns from the macOS-style master icon.
 #
 # Pipeline:
-#   1. icon-compose.py (Pillow) composes logo.png into a Big Sur-style squircle
-#      plate -> assets/mdbijou-icon-1024.png. Skipped silently if python3/Pillow
+#   1. icon-compose.py (Pillow) scales the full-bleed logo.png artwork to
+#      assets/mdbijou-icon-1024.png. Skipped silently if python3/Pillow
 #      is unavailable (falls back to using logo.png directly).
 #   2. sips + iconutil turn the master into the .icns iconset.
 #
