@@ -132,7 +132,9 @@ fn main() -> eframe::Result {
         cfg.default_view = View::Edit;
     }
 
-    let path = file.map(std::path::PathBuf::from);
+    let path = file
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
 
     // Forward macOS "open documents" requests (Finder double-click, `open`,
     // Dock drop) into the app. Must be installed before `run_native`: AppKit

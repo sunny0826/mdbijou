@@ -99,79 +99,90 @@ impl<'a> Editor<'a> {
         // Wrap in a Frame that feels like paper: surface fill, hairline hr,
         // radius_md, symmetric padding, shadow_sm.
         let mut pending_insert: Option<String> = None;
-        egui::Frame::new()
-            .fill(self.theme.c.surface)
-            .stroke(Stroke::new(metrics.hairline, self.theme.c.hr))
-            .corner_radius(CornerRadius::same(metrics.radius_md as u8))
-            .inner_margin(Margin::symmetric(6, 4))
-            .shadow(metrics.shadow_sm)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                    let btns: [(&str, &str, &str); 5] = [
-                        (regular::TEXT_H_ONE, "插入标题 (# )", "# "),
-                        (regular::TEXT_B, "插入加粗 (**)", "**粗体**"),
-                        (regular::TEXT_ITALIC, "插入斜体 (*)", "*斜体*"),
-                        (
-                            regular::LINK,
-                            "插入链接 []()",
-                            "[文本](https://example.com)",
-                        ),
-                        (regular::CODE, "插入行内代码 ``", "`代码`"),
-                    ];
-                    for (glyph, tip, snippet) in btns {
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(4),
-                                self.theme.c.code_bg,
-                            );
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if resp.is_pointer_button_down_on() {
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(4),
-                                self.theme.c.code_bg.gamma_multiply(0.9),
-                            );
-                        }
-                        let icon_color = if resp.hovered() {
-                            fg
-                        } else {
-                            self.theme.c.muted
-                        };
-                        crate::app::paint_optical_centered_text(
-                            ui.painter(),
-                            rect,
-                            glyph,
-                            FontId::proportional(12.0),
-                            icon_color,
-                        );
-                        if resp.clicked() {
-                            pending_insert = Some(snippet.to_string());
-                        }
-                        if resp.hovered() {
-                            resp.on_hover_ui(|ui| {
-                                let font = egui::FontId::proportional(12.0);
-                                let col = ui.visuals().text_color();
-                                let g = ui.fonts_mut(|f| {
-                                    f.layout_no_wrap(tip.to_owned(), font.clone(), col)
-                                });
-                                let (r, _) = ui.allocate_exact_size(g.size(), egui::Sense::hover());
+        {
+            let bar_content_w = 5.0 * 22.0 + 4.0 * 4.0;
+            let bar_w = bar_content_w + 12.0;
+            let avail = ui.available_width();
+            let pad = ((avail - bar_w) * 0.5).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(pad);
+                egui::Frame::new()
+                    .fill(self.theme.c.surface)
+                    .stroke(Stroke::new(metrics.hairline, self.theme.c.hr))
+                    .corner_radius(CornerRadius::same(metrics.radius_md as u8))
+                    .inner_margin(Margin::symmetric(6, 4))
+                    .shadow(metrics.shadow_sm)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                            let btns: [(&str, &str, &str); 5] = [
+                                (regular::TEXT_H_ONE, "插入标题 (# )", "# "),
+                                (regular::TEXT_B, "插入加粗 (**)", "**粗体**"),
+                                (regular::TEXT_ITALIC, "插入斜体 (*)", "*斜体*"),
+                                (
+                                    regular::LINK,
+                                    "插入链接 []()",
+                                    "[文本](https://example.com)",
+                                ),
+                                (regular::CODE, "插入行内代码 ``", "`代码`"),
+                            ];
+                            for (glyph, tip, snippet) in btns {
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
+                                if resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        CornerRadius::same(4),
+                                        self.theme.c.code_bg,
+                                    );
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if resp.is_pointer_button_down_on() {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        CornerRadius::same(4),
+                                        self.theme.c.code_bg.gamma_multiply(0.9),
+                                    );
+                                }
+                                let icon_color = if resp.hovered() {
+                                    fg
+                                } else {
+                                    self.theme.c.muted
+                                };
                                 crate::app::paint_optical_centered_text(
                                     ui.painter(),
-                                    r,
-                                    tip,
-                                    font,
-                                    col,
+                                    rect,
+                                    glyph,
+                                    FontId::proportional(12.0),
+                                    icon_color,
                                 );
-                            });
-                        }
-                    }
-                });
+                                if resp.clicked() {
+                                    pending_insert = Some(snippet.to_string());
+                                }
+                                if resp.hovered() {
+                                    resp.on_hover_ui(|ui| {
+                                        let font = egui::FontId::proportional(12.0);
+                                        let col = ui.visuals().text_color();
+                                        let g = ui.fonts_mut(|f| {
+                                            f.layout_no_wrap(tip.to_owned(), font.clone(), col)
+                                        });
+                                        let (r, _) =
+                                            ui.allocate_exact_size(g.size(), egui::Sense::hover());
+                                        crate::app::paint_optical_centered_text(
+                                            ui.painter(),
+                                            r,
+                                            tip,
+                                            font,
+                                            col,
+                                        );
+                                    });
+                                }
+                            }
+                        });
+                    });
             });
+        }
+        let mut pending_cursor: Option<usize> = None;
         if let Some(snippet) = pending_insert {
             let total_chars = doc.text.chars().count();
             let raw_idx = egui::TextEdit::load_state(ui.ctx(), te_id)
@@ -185,24 +196,18 @@ impl<'a> Editor<'a> {
                 .nth(char_idx)
                 .map(|(i, _)| i)
                 .unwrap_or(doc.text.len());
-            debug_assert!(doc.text.is_char_boundary(byte_idx));
-            doc.text.insert_str(byte_idx, &snippet);
-            doc.dirty = true;
-            te_changed = true;
-            // Move cursor to end of inserted snippet.
-            let new_char_idx = char_idx + snippet.chars().count();
-            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
-                let cc = CCursor::new(new_char_idx);
-                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
-                state.store(ui.ctx(), te_id);
-                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+            let byte_idx = if doc.text.is_char_boundary(byte_idx) {
+                byte_idx
             } else {
-                // No prior state: create one with cursor at new position.
-                let mut state = TextEditState::default();
-                let cc = CCursor::new(new_char_idx);
-                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
-                state.store(ui.ctx(), te_id);
-                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+                doc.text.len()
+            };
+            if byte_idx <= doc.text.len() && doc.text.is_char_boundary(byte_idx) {
+                doc.text.insert_str(byte_idx, &snippet);
+                doc.dirty = true;
+                te_changed = true;
+                let new_char_idx =
+                    (char_idx + snippet.chars().count()).min(doc.text.chars().count());
+                pending_cursor = Some(new_char_idx);
             }
         }
 
@@ -234,11 +239,9 @@ impl<'a> Editor<'a> {
             rows_per_line.push(line_rows(ui, line, &mono, row_h, prev_wrap_w));
         }
 
-        // Vertically center the source when it is shorter than the viewport;
-        // taller documents stay top-aligned and scrollable.
         let total_rows: usize = rows_per_line.iter().sum::<usize>().max(1);
-        let content_h = total_rows as f32 * row_h + 12.0; // + TextEdit vertical margins
-        let top_pad = ((ui.available_height() - content_h) / 2.0).max(0.0);
+        let remaining = ui.available_height().max(200.0);
+        let display_rows = total_rows.max(((remaining - 16.0) / row_h).ceil().max(8.0) as usize);
 
         // Current line for gutter highlight and background highlight.
         let current_line = if highlight_on {
@@ -268,10 +271,13 @@ impl<'a> Editor<'a> {
 
         let mut anchor_jump: Option<String> = None;
 
+        let scroll_h = remaining.max(100.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .max_height(scroll_h)
             .show(ui, |ui| {
-                ui.add_space(top_pad);
+                ui.set_min_height(scroll_h);
+                ui.add_space(4.0);
                 let scroll_target_y = scroll_to_line.map(|line| {
                     let idx = line.min(rows_per_line.len().saturating_sub(1));
                     let y_off = rows_per_line[..idx].iter().sum::<usize>() as f32 * row_h;
@@ -283,10 +289,10 @@ impl<'a> Editor<'a> {
                     if self.cfg.show_line_numbers {
                         let gutter_w = 44.0;
                         let (gutter_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(gutter_w, row_h * total_rows as f32),
+                            egui::vec2(gutter_w, row_h * display_rows as f32),
                             Sense::hover(),
                         );
-                        let mono_gutter = FontId::monospace(12.0);
+                        let mono_gutter = FontId::monospace(font_size);
                         let muted_soft = self.theme.c.muted.gamma_multiply(0.75);
                         let mut y = gutter_rect.min.y;
                         for (i, &rows) in rows_per_line.iter().enumerate() {
@@ -294,18 +300,20 @@ impl<'a> Editor<'a> {
                             let color = if is_current { fg } else { muted_soft };
                             let text = (i + 1).to_string();
                             let galley = ui.fonts_mut(|f| {
-                                f.layout_no_wrap(text.clone(), mono_gutter.clone(), color)
+                                let mut job = LayoutJob::default();
+                                job.append(
+                                    &text,
+                                    0.0,
+                                    TextFormat {
+                                        font_id: mono_gutter.clone(),
+                                        line_height: Some(row_h),
+                                        color,
+                                        ..Default::default()
+                                    },
+                                );
+                                f.layout_job(job)
                             });
-                            let mut shift_y = 0.0;
-                            if let Some(placed) = galley.rows.first() {
-                                let ink = placed.row.visuals.mesh_bounds;
-                                if ink.is_finite() && ink.height() > 0.0 {
-                                    let ink_center_y = placed.pos.y + ink.center().y;
-                                    shift_y = galley.rect.center().y - ink_center_y;
-                                }
-                            }
-                            let slot_center_y = y + row_h * rows as f32 * 0.5;
-                            let gy = slot_center_y - galley.size().y / 2.0 + shift_y;
+                            let gy = y + (row_h * rows as f32 - galley.size().y) * 0.5;
                             let gx = gutter_rect.max.x - galley.size().x;
                             ui.painter().galley(egui::pos2(gx, gy), galley, color);
                             y += row_h * rows as f32;
@@ -368,13 +376,15 @@ impl<'a> Editor<'a> {
                     };
 
                     let te = TextEdit::multiline(&mut doc.text)
+                        .id(te_id)
                         .font(mono.clone())
                         .desired_width(ui.available_width())
+                        .desired_rows(display_rows)
                         .layouter(&mut layouter)
-                        .frame(true)
+                        .frame(false)
                         .background_color(bg)
                         .text_color(fg)
-                        .margin(Margin::symmetric(10, 8));
+                        .margin(Margin::symmetric(10, 0));
                     let out = te.show(ui);
                     if out.response.changed() {
                         te_changed = true;
@@ -403,6 +413,7 @@ impl<'a> Editor<'a> {
                         }
                     }
                 });
+                ui.add_space(12.0);
                 if let Some(y) = scroll_target_y {
                     if let Some(line) = scroll_to_line {
                         let h = row_h * rows_per_line.get(line).copied().unwrap_or(1) as f32;
@@ -414,6 +425,18 @@ impl<'a> Editor<'a> {
                     }
                 }
             });
+        if let Some(new_idx) = pending_cursor {
+            let cc = CCursor::new(new_idx.min(doc.text.chars().count()));
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+            } else {
+                let mut state = TextEditState::default();
+                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+            }
+            ui.ctx().memory_mut(|m| m.request_focus(te_id));
+        }
         let cursor = egui::TextEdit::load_state(ui.ctx(), te_id)
             .and_then(|s| s.cursor.char_range())
             .map(|r| r.primary.index)
@@ -562,6 +585,7 @@ fn editor_job(
             line.to_string()
         };
         if highlight_on {
+            let before = job.text.len();
             match role {
                 LineRole::Markdown => {
                     for sp in hl.markdown_line(&display) {
@@ -596,6 +620,18 @@ fn editor_job(
                     }
                 }
             }
+            if job.text.len() == before {
+                job.append(
+                    &display,
+                    0.0,
+                    TextFormat {
+                        font_id: mono.clone(),
+                        line_height: Some(line_h),
+                        color: fg,
+                        ..Default::default()
+                    },
+                );
+            }
         } else {
             job.append(
                 &display,
@@ -620,6 +656,18 @@ fn editor_job(
                 },
             );
         }
+    }
+    if job.text.is_empty() {
+        job.append(
+            "",
+            0.0,
+            TextFormat {
+                font_id: mono.clone(),
+                line_height: Some(line_h),
+                color: fg,
+                ..Default::default()
+            },
+        );
     }
     job
 }

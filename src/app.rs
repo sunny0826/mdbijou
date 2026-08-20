@@ -108,7 +108,7 @@ impl MdbijouApp {
             .set_fonts(crate::fonts::build_fonts(&cfg.font_family));
 
         let view = cfg.default_view;
-        let toc_drawer_open = cfg.show_toc;
+        let toc_drawer_open = false;
 
         Self {
             cfg,
@@ -283,7 +283,7 @@ impl MdbijouApp {
             });
     }
 
-    fn dispatch(&mut self, cmd: Cmd) {
+    fn dispatch(&mut self, ctx: &egui::Context, cmd: Cmd) {
         match cmd {
             Cmd::ToggleView => {
                 if self.view == View::Preview {
@@ -292,6 +292,9 @@ impl MdbijouApp {
                     self.doc.reparse();
                     self.need_reparse = false;
                     self.view = View::Preview;
+                    if let Some(f) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(f));
+                    }
                 }
             }
             Cmd::Save => {
@@ -403,10 +406,11 @@ impl MdbijouApp {
             }
             optical_tooltip(&resp, tooltip);
         }
+        let tctx = ui.ctx().clone();
         match clicked_icon {
-            Some(0) => self.dispatch(Cmd::Open),
-            Some(1) => self.dispatch(Cmd::Save),
-            Some(2) => self.dispatch(Cmd::ToggleSettings),
+            Some(0) => self.dispatch(&tctx, Cmd::Open),
+            Some(1) => self.dispatch(&tctx, Cmd::Save),
+            Some(2) => self.dispatch(&tctx, Cmd::ToggleSettings),
             _ => {}
         }
 
@@ -524,9 +528,10 @@ impl MdbijouApp {
             egui::pos2(bar_rect.right() - 10.0 - 46.0, center_y),
             egui::vec2(92.0, 22.0),
         );
+        let sctx = ui.ctx().clone();
         ui.scope_builder(egui::UiBuilder::new().max_rect(switch_rect), |ui| {
             if self.view_switch(ui, &theme) {
-                self.dispatch(Cmd::ToggleView);
+                self.dispatch(&sctx, Cmd::ToggleView);
             }
         });
     }
@@ -1423,22 +1428,22 @@ impl eframe::App for MdbijouApp {
 
         // ------- keyboard shortcuts -------
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
-            self.dispatch(Cmd::ToggleView);
+            self.dispatch(ctx, Cmd::ToggleView);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.dispatch(Cmd::Save);
+            self.dispatch(ctx, Cmd::Save);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
-            self.dispatch(Cmd::Reload);
+            self.dispatch(ctx, Cmd::Reload);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
-            self.dispatch(Cmd::Open);
+            self.dispatch(ctx, Cmd::Open);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
-            self.dispatch(Cmd::ToggleSettings);
+            self.dispatch(ctx, Cmd::ToggleSettings);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {
-            self.dispatch(Cmd::ToggleToc);
+            self.dispatch(ctx, Cmd::ToggleToc);
         }
 
         // ------- reparse pending edits before any panel reads the doc -------
@@ -1557,7 +1562,8 @@ impl eframe::App for MdbijouApp {
                 .unwrap_or_else(|| self.heading_anchors[0].0.clone());
             self.toc_active_anchor = Some(anchor);
         }
-        let show_toc_panel = self.cfg.show_toc && !narrow;
+        let has_toc = !self.toc_entries.is_empty();
+        let show_toc_panel = self.cfg.show_toc && !narrow && has_toc;
         if show_toc_panel {
             egui::SidePanel::left("toc")
                 .resizable(true)
@@ -1663,8 +1669,10 @@ impl eframe::App for MdbijouApp {
                             .or_else(|| find_heading_line_by_anchor_fuzzy(&self.doc.text, &anchor))
                         {
                             self.pending_editor_line = Some(line);
-                        } else if let Some(entry) =
-                            self.toc_entries.iter().find(|e| anchor_eq(&e.anchor, &anchor))
+                        } else if let Some(entry) = self
+                            .toc_entries
+                            .iter()
+                            .find(|e| anchor_eq(&e.anchor, &anchor))
                         {
                             if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
                                 self.pending_editor_line = Some(line);
@@ -1680,7 +1688,7 @@ impl eframe::App for MdbijouApp {
             });
 
         // ------- narrow-window TOC drawer -------
-        if self.cfg.show_toc && narrow {
+        if self.cfg.show_toc && narrow && has_toc {
             let hr3 = th.c.hr;
             let muted3 = th.c.muted;
             let surface3 = surface;
@@ -1800,7 +1808,8 @@ impl eframe::App for MdbijouApp {
                                     btn_color,
                                 );
                                 if resp.clicked() {
-                                    self.dispatch(Cmd::ToggleToc);
+                                    let cc = ctx.clone();
+                                    self.dispatch(&cc, Cmd::ToggleToc);
                                 }
                                 optical_tooltip(&resp, tip);
                             });
@@ -1879,21 +1888,18 @@ impl MdbijouApp {
                     let empty_h = 180.0;
                     let top = ((viewport_h - empty_h) / 2.0).max(24.0);
                     ui.add_space(top);
+                    let avail_w = ui.available_width();
+                    let col_w = effective.min((avail_w - 24.0).max(200.0));
+                    let pad_x = ((avail_w - col_w) * 0.5).max(0.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(pad);
-                        ui.vertical(|ui| {
-                            ui.set_max_width(effective);
-                            ui.vertical_centered(|ui| {
+                        ui.add_space(pad_x);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(col_w, empty_h),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
                                 let muted_dim = theme.c.muted.gamma_multiply(0.25);
-                                let icon_galley = ui.fonts_mut(|f| {
-                                    f.layout_no_wrap(
-                                        regular::FILE_TEXT.to_owned(),
-                                        egui::FontId::proportional(48.0),
-                                        muted_dim,
-                                    )
-                                });
                                 let (icon_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(effective, 52.0),
+                                    egui::vec2(col_w, 52.0),
                                     egui::Sense::hover(),
                                 );
                                 paint_optical_centered_text(
@@ -1903,14 +1909,11 @@ impl MdbijouApp {
                                     egui::FontId::proportional(48.0),
                                     muted_dim,
                                 );
-                                let _ = icon_galley;
                                 ui.add_space(10.0);
-                                let title_rect = ui
-                                    .allocate_exact_size(
-                                        egui::vec2(effective, 22.0),
-                                        egui::Sense::hover(),
-                                    )
-                                    .0;
+                                let (title_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(col_w, 22.0),
+                                    egui::Sense::hover(),
+                                );
                                 paint_optical_centered_text(
                                     ui.painter(),
                                     title_rect,
@@ -1919,12 +1922,10 @@ impl MdbijouApp {
                                     theme.c.foreground,
                                 );
                                 ui.add_space(6.0);
-                                let sub_rect = ui
-                                    .allocate_exact_size(
-                                        egui::vec2(effective, 16.0),
-                                        egui::Sense::hover(),
-                                    )
-                                    .0;
+                                let (sub_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(col_w, 16.0),
+                                    egui::Sense::hover(),
+                                );
                                 paint_optical_centered_text(
                                     ui.painter(),
                                     sub_rect,
@@ -1933,22 +1934,18 @@ impl MdbijouApp {
                                     theme.c.muted,
                                 );
                                 ui.add_space(18.0);
-                                ui.horizontal(|ui| {
-                                    let btn_w = 110.0;
-                                    let x_off = ((effective - btn_w) * 0.5).max(0.0);
-                                    ui.add_space(x_off);
-                                    if empty_primary_button(ui, "打开文件", theme.c.link, m) {
-                                        do_open = true;
-                                    }
-                                });
-                            });
-                        });
+                                if empty_primary_button(ui, "打开文件", theme.c.link, m) {
+                                    do_open = true;
+                                }
+                            },
+                        );
                     });
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(content_h_id, empty_h + top));
                 });
             if do_open {
-                self.dispatch(Cmd::Open);
+                let oc = ui.ctx().clone();
+                self.dispatch(&oc, Cmd::Open);
             }
             self.heading_anchors.clear();
             return;
@@ -2556,10 +2553,7 @@ fn find_heading_rect<'a>(
     if let Some(found) = anchors.iter().find(|(a, _)| a == &slug) {
         return Some(found);
     }
-    if let Some(found) = anchors
-        .iter()
-        .find(|(a, _)| a.eq_ignore_ascii_case(&slug))
-    {
+    if let Some(found) = anchors.iter().find(|(a, _)| a.eq_ignore_ascii_case(&slug)) {
         return Some(found);
     }
     anchors.iter().find(|(a, _)| anchor_eq(a, query))
