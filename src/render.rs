@@ -33,6 +33,10 @@ pub struct RenderCtx<'a> {
     pub toc_entries: Vec<crate::toc::TocEntry>,
     /// Cursor into `toc_entries` for the next heading encountered.
     pub toc_cursor: usize,
+    /// Internal anchor clicked during this render pass, if any. Set by
+    /// `paint_job` when a `dest` starting with `#` is clicked; the preview
+    /// host (`MdbijouApp`) drains it to trigger `pending_toc_anchor` scrolling.
+    pub clicked_anchor: Option<String>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -57,6 +61,7 @@ impl<'a> RenderCtx<'a> {
             heading_anchors: Vec::new(),
             toc_entries: Vec::new(),
             toc_cursor: 0,
+            clicked_anchor: None,
         }
     }
 
@@ -87,6 +92,7 @@ impl<'a> RenderCtx<'a> {
 pub fn render_document(ui: &mut Ui, doc: &crate::document::Document, ctx: &mut RenderCtx) {
     ctx.heading_anchors.clear();
     ctx.toc_cursor = 0;
+    ctx.clicked_anchor = None;
     render_blocks(ui, &doc.blocks, ctx, 0);
 }
 
@@ -114,7 +120,7 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
                 _ => 14.0, // metrics.space_md + 2
             };
             ui.add_space(top_space);
-            let rect = paint_job(ui, job, links, strikes, color, *align);
+            let rect = paint_job(ui, job, links, strikes, color, *align, ctx);
             if *level == 1 {
                 let anchor_id =
                     ui.id()
@@ -188,7 +194,7 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             } else {
                 let (job, links, strikes) =
                     build_inline_job(inlines, ctx, ctx.theme.c.foreground, ctx.body_font());
-                paint_job(ui, job, links, strikes, ctx.theme.c.foreground, *align);
+                paint_job(ui, job, links, strikes, ctx.theme.c.foreground, *align, ctx);
             }
             ui.add_space(7.0);
         }
@@ -489,6 +495,56 @@ fn append_inline(
     }
 }
 
+fn extract_internal_anchor(dest: &str) -> Option<String> {
+    let trimmed = dest.trim();
+    let stripped = trimmed.strip_prefix('#')?;
+    let raw = stripped.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let decoded = percent_decode(raw);
+    let anchor = decoded.trim().to_string();
+    if anchor.is_empty() {
+        None
+    } else {
+        Some(anchor)
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut bytes = s.as_bytes().iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = bytes.next();
+            let lo = bytes.next();
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                let hex = [hi, lo];
+                if let Ok(hex_str) = std::str::from_utf8(&hex) {
+                    if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                        out.push(val as char);
+                        continue;
+                    }
+                }
+                out.push('%');
+                out.push(hi as char);
+                out.push(lo as char);
+            } else {
+                out.push('%');
+                if let Some(hi) = hi {
+                    out.push(hi as char);
+                }
+                if let Some(lo) = lo {
+                    out.push(lo as char);
+                }
+            }
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
 /// Layout and paint a rich-text job, wiring up clickable link spans and
 /// manually-drawn strikethrough lines. `align` shifts single-line jobs
 /// horizontally (wrapped text stays left-aligned within the block). Returns
@@ -500,6 +556,7 @@ fn paint_job(
     strikes: Vec<StrikeSpan>,
     default: Color32,
     align: Align,
+    ctx: &mut RenderCtx,
 ) -> Rect {
     let wrap_width = ui.available_width().max(20.0);
     job.wrap.max_width = wrap_width;
@@ -569,7 +626,11 @@ fn paint_job(
         let id = ui.id().with(("link", &link.url, link.start));
         let resp = ui.interact(hit, id, Sense::click());
         if resp.clicked() {
-            open_url(&link.url);
+            if let Some(anchor) = extract_internal_anchor(&link.url) {
+                ctx.clicked_anchor = Some(anchor);
+            } else {
+                open_url(&link.url);
+            }
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
