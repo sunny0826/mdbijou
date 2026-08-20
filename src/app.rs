@@ -13,7 +13,7 @@ use crate::render::RenderCtx;
 use crate::theme::{Metrics, Theme, ThemeRegistry};
 use crate::toc::{self, TocEntry};
 use eframe::egui;
-use egui::{Color32, RichText};
+use egui::Color32;
 use egui_phosphor::regular;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -52,6 +52,8 @@ pub struct MdbijouApp {
     pending_editor_line: Option<usize>,
     /// Narrow-window drawer visibility (wide windows use the side panel).
     toc_drawer_open: bool,
+    toc_filter: String,
+    toc_active_anchor: Option<String>,
 }
 
 #[derive(Debug)]
@@ -129,6 +131,8 @@ impl MdbijouApp {
             pending_toc_anchor: None,
             pending_editor_line: None,
             toc_drawer_open,
+            toc_filter: String::new(),
+            toc_active_anchor: None,
         }
     }
 
@@ -310,37 +314,38 @@ impl MdbijouApp {
         }
     }
 
-    /// The traffic-light toolbar: hover-revealed action icons and an
-    /// edit/preview switch pinned to the top-right.
+    /// The traffic-light toolbar: always-visible icon group, centered title
+    /// with dirty/ feedback state, and an edit/preview switch.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
+        let accent = theme.c.link;
+        let bg = theme.c.background;
+        let surface = theme.c.surface;
 
-        // The whole bar is draggable (empty areas) so the window can still be
-        // moved now that the native title bar is transparent.
         let bar_rect = ui.max_rect();
+        // Paper warmth: bg blended with 2% surface when not already warm paper.
+        let warm_bg = if theme.id == "bijou-light" {
+            bg
+        } else {
+            lerp_color(bg, surface, 0.02)
+        };
+        ui.painter().rect_filled(bar_rect, 0.0, warm_bg);
+
         let drag_resp = ui.interact(bar_rect, ui.id().with("titlebar_drag"), egui::Sense::drag());
         if drag_resp.drag_started() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
-        // Hairline separating the bar from the content below.
+        let hairline = self.metrics(ui.ctx()).hairline.max(1.0);
         ui.painter().hline(
             bar_rect.left()..=bar_rect.right(),
             bar_rect.bottom() - 0.5,
-            egui::Stroke::new(1.0, theme.c.hr),
+            egui::Stroke::new(hairline, theme.c.hr),
         );
 
-        // Open/save icons fade in while the pointer is over the bar; the
-        // settings gear is always visible.
-        let bar_hovered = ui.rect_contains_pointer(bar_rect);
-        let reveal = ui
-            .ctx()
-            .animate_bool(ui.id().with("icon_reveal"), bar_hovered);
-
-        // Action icons optically matched to the traffic-light buttons: 13pt
-        // Phosphor glyphs in 22pt slots, centered on the traffic lights.
+        // Action icons: always resident at muted 0.65, hover -> fg/accent.
         let light_y = crate::macos::traffic_light_center();
         let icon_area_w = 3.0 * 22.0 + 2.0 * 4.0;
         let icon_y = bar_rect.top() + light_y;
@@ -354,18 +359,12 @@ impl MdbijouApp {
         .into_iter()
         .enumerate()
         {
-            // Gear stays visible while the settings page is open as a close
-            // affordance; other icons fade in on hover.
             let active = idx == 2 && self.show_settings;
-            let fade = if active { 1.0 } else { reveal };
             let rect = egui::Rect::from_center_size(
                 egui::pos2(icon_x + 11.0, icon_y),
                 egui::vec2(22.0, 22.0),
             );
             icon_x += 26.0;
-            if fade <= 0.0 {
-                continue;
-            }
             let resp = ui.interact(
                 rect,
                 ui.id().with(("toolbar_icon", idx)),
@@ -376,18 +375,25 @@ impl MdbijouApp {
                 ui.painter().circle_filled(
                     rect.center(),
                     11.0,
-                    ui.visuals()
-                        .widgets
-                        .hovered
-                        .weak_bg_fill
-                        .gamma_multiply(fade),
+                    ui.visuals().widgets.hovered.weak_bg_fill,
                 );
             }
-            let base = if active { fg } else { muted };
-            let color = (if resp.hovered() { fg } else { base }).gamma_multiply(fade);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
+            let base = if active {
+                fg
+            } else {
+                muted.gamma_multiply(0.65)
+            };
+            let hover_color = if idx == 2 { fg } else { accent };
+            let color = if resp.hovered() {
+                hover_color
+            } else if active {
+                fg
+            } else {
+                base
+            };
+            paint_optical_centered_text(
+                ui.painter(),
+                rect,
                 glyph,
                 egui::FontId::proportional(13.0),
                 color,
@@ -395,7 +401,7 @@ impl MdbijouApp {
             if resp.clicked() {
                 clicked_icon = Some(idx);
             }
-            resp.on_hover_text(tooltip);
+            optical_tooltip(&resp, tooltip);
         }
         match clicked_icon {
             Some(0) => self.dispatch(Cmd::Open),
@@ -404,37 +410,116 @@ impl MdbijouApp {
             _ => {}
         }
 
-        // Feedback (save status) and view switch are drawn against the bar's
-        // geometric center: egui row layout aligns children by content height
-        // (and galleys carry ascender/descender padding), which left the text
-        // sitting visibly high in the bar.
+        // Title zone: filename centered at bar_rect.center().x, dirty dot in accent,
+        // feedback stacked below title when present.
         let center_y = bar_rect.center().y;
-        let feedback = match &self.feedback {
-            Some((expiry, msg, color)) if *expiry > Instant::now() => Some((
-                ui.fonts_mut(|f| {
-                    f.layout_no_wrap(msg.clone(), egui::FontId::proportional(12.0), *color)
-                }),
-                *color,
-            )),
+        let raw_name = self
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "未命名".to_string());
+        let dirty = self.doc.dirty;
+        let feedback_alive = match &self.feedback {
+            Some((expiry, msg, color)) if *expiry > Instant::now() => Some((msg.clone(), *color)),
             _ => None,
         };
-        let feedback_w = feedback
+        // Measure title + dirty suffix for combined width (retains former feedback_w idea).
+        let title_font = egui::FontId::proportional(12.5);
+        let feedback_font = egui::FontId::proportional(11.0);
+        let min_left = crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 12.0;
+        let switch_left = bar_rect.right() - 10.0 - 92.0 - 8.0;
+        let available_title_w = (switch_left - (bar_rect.left() + min_left) - 16.0).max(80.0);
+        // Truncate long filenames so title never covers the switch (uses existing fit_combo_text).
+        let title_text = if dirty {
+            let dot_w_tmp = ui.fonts_mut(|f| {
+                f.layout_no_wrap(" ●".to_owned(), title_font.clone(), accent)
+                    .size()
+                    .x
+            });
+            fit_combo_text(ui, &raw_name, (available_title_w - dot_w_tmp).max(20.0))
+        } else {
+            fit_combo_text(ui, &raw_name, available_title_w)
+        };
+        let (title_w, dot_w) = ui.fonts_mut(|f| {
+            let t = f.layout_no_wrap(title_text.clone(), title_font.clone(), fg);
+            let d = if dirty {
+                f.layout_no_wrap(" ●".to_owned(), title_font.clone(), accent)
+                    .size()
+                    .x
+            } else {
+                0.0
+            };
+            (t.size().x, d)
+        });
+        let title_total_w = title_w + dot_w;
+        let feedback_w = feedback_alive
             .as_ref()
-            .map(|(g, _)| g.size().x + 8.0)
+            .map(|(msg, col)| {
+                ui.fonts_mut(|f| f.layout_no_wrap(msg.clone(), feedback_font.clone(), *col))
+                    .size()
+                    .x
+            })
             .unwrap_or(0.0);
+        let _ = title_total_w.max(feedback_w); // kept for parity
 
-        // Center the feedback group horizontally.
-        let total_w = feedback_w;
-        let min_left = crate::macos::traffic_light_pad() + 2.0 + icon_area_w + 8.0;
-        let start_x =
-            (bar_rect.left() + (bar_rect.width() - total_w) / 2.0).max(bar_rect.left() + min_left);
-
-        if let Some((g, color)) = feedback {
-            let pos = egui::pos2(start_x, center_y) - egui::vec2(0.0, g.size().y / 2.0);
-            ui.painter().galley(pos, g, color);
+        let dot_galley = if dirty {
+            Some(ui.fonts_mut(|f| f.layout_no_wrap(" ●".to_owned(), title_font.clone(), accent)))
+        } else {
+            None
+        };
+        let has_feedback = feedback_alive.is_some();
+        // When feedback present, stack vertically with 2px gap.
+        let (title_center_y, feedback_center_y) = if has_feedback {
+            (center_y - 7.0, center_y + 8.0)
+        } else {
+            (center_y, center_y)
+        };
+        let title_x = bar_rect.center().x - title_total_w / 2.0;
+        // Clamp title so it never overlaps icon area or switch.
+        // With truncation above, title_total_w <= available_title_w, so clamping is stable.
+        let clamped_title_x = title_x
+            .max(bar_rect.left() + min_left)
+            .min((switch_left - title_total_w - 8.0).max(bar_rect.left() + min_left));
+        // Title (and dirty dot) – ink-optical vertical centering.
+        {
+            let title_rect = egui::Rect::from_center_size(
+                egui::pos2(clamped_title_x + title_w / 2.0, title_center_y),
+                egui::vec2(title_w, 16.0),
+            );
+            paint_optical_centered_text(
+                ui.painter(),
+                title_rect,
+                &title_text,
+                title_font.clone(),
+                fg,
+            );
+            if let Some(dg) = dot_galley {
+                let dot_rect = egui::Rect::from_center_size(
+                    egui::pos2(clamped_title_x + title_w + dot_w / 2.0, title_center_y),
+                    egui::vec2(dot_w, 16.0),
+                );
+                // draw dot with accent using optical centering
+                paint_optical_centered_text(
+                    ui.painter(),
+                    dot_rect,
+                    " ●",
+                    title_font.clone(),
+                    accent,
+                );
+                let _ = dg;
+            }
+        }
+        if let Some((msg, col)) = feedback_alive {
+            let fb_rect = egui::Rect::from_center_size(
+                egui::pos2(bar_rect.center().x, feedback_center_y),
+                egui::vec2(feedback_w.max(40.0), 14.0),
+            );
+            paint_optical_centered_text(ui.painter(), fb_rect, &msg, feedback_font, col);
         }
 
-        // Edit/preview segmented switch, pinned to the top-right.
+        // Edit/preview segmented switch, pinned to the top-right (92x22, spring animation kept inside view_switch).
         let switch_rect = egui::Rect::from_center_size(
             egui::pos2(bar_rect.right() - 10.0 - 46.0, center_y),
             egui::vec2(92.0, 22.0),
@@ -453,7 +538,7 @@ impl MdbijouApp {
         let painter = ui.painter();
         let metrics = self.metrics(ui.ctx());
         let rounding = egui::CornerRadius::same(metrics.radius_lg as u8);
-        painter.rect_filled(rect, rounding, theme.c.code_bg);
+        painter.rect_filled(rect, rounding, theme.c.surface_hover);
         painter.rect_stroke(
             rect,
             rounding,
@@ -469,9 +554,14 @@ impl MdbijouApp {
         let is_preview = self.view == View::Preview;
         let sel_rect = if is_preview { preview_rect } else { edit_rect };
         let sel_rounding = egui::CornerRadius::same(metrics.radius_md as u8);
-        painter.rect_filled(sel_rect.shrink(2.0), sel_rounding, theme.c.background);
+        let inner = sel_rect.shrink(2.0);
+        let shadow = metrics.shadow_sm;
+        let shadow_rect = inner.translate(egui::vec2(0.0, 1.0));
+        painter.rect_filled(shadow_rect, sel_rounding, Color32::from_black_alpha(18));
+        let _ = shadow;
+        painter.rect_filled(inner, sel_rounding, theme.c.background);
         painter.rect_stroke(
-            sel_rect.shrink(2.0),
+            inner,
             sel_rounding,
             egui::Stroke::new(1.0, theme.c.hr),
             egui::StrokeKind::Inside,
@@ -498,7 +588,7 @@ impl MdbijouApp {
             } else {
                 "切换到预览 (⌘E)"
             };
-            preview_resp.clone().on_hover_text(hint);
+            optical_tooltip(&preview_resp, hint);
         }
         (preview_resp.clicked() && !is_preview) || (edit_resp.clicked() && is_preview)
     }
@@ -565,14 +655,9 @@ impl MdbijouApp {
                 ui.set_opacity(fade);
                 egui::Frame::new()
                     .fill(theme.c.background)
-                    .corner_radius(metrics.radius_lg)
-                    .stroke(egui::Stroke::new(1.0, theme.c.hr))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 8],
-                        blur: 24,
-                        spread: 0,
-                        color: Color32::from_black_alpha(60),
-                    })
+                    .corner_radius(metrics.radius_xl)
+                    .stroke(egui::Stroke::new(metrics.hairline.max(1.0), theme.c.hr))
+                    .shadow(metrics.shadow_md)
                     .inner_margin(egui::Margin::same(22))
                     .show(ui, |ui| {
                         ui.set_width(400.0);
@@ -651,7 +736,7 @@ impl MdbijouApp {
                                     if resp.clicked() {
                                         close = true;
                                     }
-                                    resp.on_hover_text("关闭 (Esc)");
+                                    optical_tooltip(&resp, "关闭 (Esc)");
                                 },
                             );
                         });
@@ -670,7 +755,7 @@ impl MdbijouApp {
                             });
                             ui.add_space(6.0);
                             ui.add_enabled_ui(!follow, |ui| {
-                                hairline(ui, theme.c.hr);
+                                hairline(ui, theme.c.hr.gamma_multiply(0.6));
                                 ui.add_space(8.0);
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
@@ -684,7 +769,7 @@ impl MdbijouApp {
                                 ui.add_space(4.0);
                             });
                             ui.add_space(6.0);
-                            hairline(ui, theme.c.hr);
+                            hairline(ui, theme.c.hr.gamma_multiply(0.6));
                             ui.add_space(8.0);
                             settings_row(ui, "显示目录", fg, |ui| {
                                 let mut show_toc = self.cfg.show_toc;
@@ -713,13 +798,38 @@ impl MdbijouApp {
                                     .selected_text("")
                                     .show_ui(ui, |ui| {
                                         for f in crate::fonts::BODY_FONTS {
-                                            if ui
-                                                .selectable_label(
-                                                    self.cfg.font_family == f.id,
-                                                    RichText::new(f.name).size(12.0),
-                                                )
-                                                .clicked()
-                                            {
+                                            let is_selected = self.cfg.font_family == f.id;
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                egui::vec2(ui.available_width(), 20.0),
+                                                egui::Sense::click(),
+                                            );
+                                            if is_selected {
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    egui::CornerRadius::same(4),
+                                                    theme.c.link.gamma_multiply(0.12),
+                                                );
+                                            } else if resp.hovered() {
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    egui::CornerRadius::same(4),
+                                                    theme.c.code_bg,
+                                                );
+                                            }
+                                            if resp.hovered() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
+                                            let col = if is_selected { fg } else { muted };
+                                            paint_optical_left(
+                                                ui.painter(),
+                                                rect.shrink2(egui::vec2(6.0, 0.0)),
+                                                f.name,
+                                                egui::FontId::proportional(12.0),
+                                                col,
+                                            );
+                                            if resp.clicked() {
                                                 font_picked = Some(f.id.to_string());
                                             }
                                         }
@@ -738,7 +848,7 @@ impl MdbijouApp {
                                 }
                             });
                             ui.add_space(6.0);
-                            hairline(ui, theme.c.hr);
+                            hairline(ui, theme.c.hr.gamma_multiply(0.6));
                             ui.add_space(8.0);
                             settings_row(ui, "正文字号", fg, |ui| {
                                 ink_centered_label(
@@ -762,7 +872,7 @@ impl MdbijouApp {
                                 }
                             });
                             ui.add_space(6.0);
-                            hairline(ui, theme.c.hr);
+                            hairline(ui, theme.c.hr.gamma_multiply(0.6));
                             ui.add_space(8.0);
                             settings_row(ui, "编辑器字号", fg, |ui| {
                                 ink_centered_label(
@@ -806,9 +916,9 @@ impl MdbijouApp {
                             ui.horizontal(|ui| {
                                 if let Some(res) = &self.cli_status {
                                     let (mark, color) = if res.ok {
-                                        (regular::CHECK_CIRCLE, Color32::from_rgb(70, 170, 90))
+                                        (regular::CHECK_CIRCLE, theme.c.success)
                                     } else {
-                                        (regular::X_CIRCLE, Color32::from_rgb(220, 90, 70))
+                                        (regular::X_CIRCLE, theme.c.error)
                                     };
                                     cli_status_label(ui, mark, &res.message, color, SETTINGS_ROW_H);
                                 }
@@ -817,7 +927,8 @@ impl MdbijouApp {
                                     egui::vec2(w, SETTINGS_ROW_H),
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if settings_optical_button(ui, "安装 CLI 到本地") {
+                                        if settings_optical_button(ui, "安装 CLI 到本地", accent)
+                                        {
                                             do_install = true;
                                         }
                                     },
@@ -867,7 +978,7 @@ impl MdbijouApp {
 /// (ascent/descent of the whole font set), so with CJK fallback fonts in the
 /// stack the box extends well above the visible glyphs and naive
 /// `Align2::CENTER_CENTER` placement renders the text too high.
-fn paint_optical_centered_text(
+pub(crate) fn paint_optical_centered_text(
     painter: &egui::Painter,
     rect: egui::Rect,
     text: &str,
@@ -916,14 +1027,84 @@ fn settings_section(ui: &mut egui::Ui, icon: &str, text: &str, muted: Color32) {
 /// Grouped-panel container (macOS System Settings style): a rounded, subtly
 /// filled box holding one settings section's rows.
 fn settings_group(ui: &mut egui::Ui, theme: &Theme, add: impl FnOnce(&mut egui::Ui)) {
+    let m = Metrics::scaled(ui.ctx().pixels_per_point());
     egui::Frame::new()
-        .fill(theme.c.code_bg)
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(12, 2))
+        .fill(theme.c.surface)
+        .stroke(egui::Stroke::new(m.hairline.max(1.0), theme.c.hr))
+        .corner_radius(m.radius_md)
+        .shadow(m.shadow_sm)
+        .inner_margin(egui::Margin::symmetric(14, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui);
         });
+}
+
+fn optical_tooltip(resp: &egui::Response, text: &str) {
+    resp.clone().on_hover_ui(|ui| {
+        let font = egui::FontId::proportional(12.0);
+        let color = ui.visuals().text_color();
+        if text.contains('⌘') {
+            let mut parts: Vec<String> = Vec::new();
+            let mut cur = String::new();
+            for ch in text.chars() {
+                if ch == '⌘' {
+                    if !cur.is_empty() {
+                        parts.push(cur.clone());
+                        cur.clear();
+                    }
+                    parts.push(ch.to_string());
+                } else {
+                    cur.push(ch);
+                }
+            }
+            if !cur.is_empty() {
+                parts.push(cur);
+            }
+            let slot_h = 16.0;
+            let gap = 0.0;
+            let mut widths: Vec<f32> = Vec::new();
+            for p in &parts {
+                let g = ui.fonts_mut(|f| f.layout_no_wrap(p.clone(), font.clone(), color));
+                widths.push(g.size().x);
+            }
+            let total_w: f32 = widths.iter().sum();
+            let (outer, _) =
+                ui.allocate_exact_size(egui::vec2(total_w, slot_h), egui::Sense::hover());
+            let mut x = outer.min.x;
+            for (p, w) in parts.iter().zip(widths) {
+                let seg_rect =
+                    egui::Rect::from_min_size(egui::pos2(x, outer.min.y), egui::vec2(w, slot_h));
+                paint_optical_centered_text(ui.painter(), seg_rect, p, font.clone(), color);
+                x += w + gap;
+            }
+        } else {
+            let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), color));
+            let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+            paint_optical_centered_text(ui.painter(), rect, text, font, color);
+        }
+    });
+}
+
+fn paint_optical_left(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+) {
+    let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
+    let mut shift_y = 0.0;
+    if let Some(placed) = galley.rows.first() {
+        let ink = placed.row.visuals.mesh_bounds;
+        if ink.is_finite() && ink.height() > 0.0 {
+            let ink_center_y = placed.pos.y + ink.center().y;
+            shift_y = galley.rect.center().y - ink_center_y;
+        }
+    }
+    let y = rect.center().y - galley.size().y / 2.0 + shift_y;
+    let x = rect.left();
+    painter.galley(egui::pos2(x, y), galley, color);
 }
 
 /// Ink-optically center `text` within a fixed `height`-tall slot sized to the
@@ -969,34 +1150,104 @@ fn cli_status_label(ui: &mut egui::Ui, mark: &str, msg: &str, color: Color32, he
     paint_optical_centered_text(ui.painter(), msg_rect, msg, font, color);
 }
 
-fn settings_optical_button(ui: &mut egui::Ui, text: &str) -> bool {
+fn settings_optical_button(ui: &mut egui::Ui, text: &str, accent: Color32) -> bool {
     let font = egui::FontId::proportional(12.0);
-    let pad_x = 10.0;
-    let h = 24.0;
+    let pad_x = 12.0;
+    let h = 26.0;
     let w = ui.fonts_mut(|f| {
         f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
             .size()
             .x
     }) + pad_x * 2.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
-    let visuals = if resp.is_pointer_button_down_on() {
-        ui.visuals().widgets.active
+    let m = Metrics::scaled(ui.ctx().pixels_per_point());
+    let rounding = egui::CornerRadius::same(m.radius_md as u8);
+    let fill = if resp.is_pointer_button_down_on() {
+        accent.gamma_multiply(0.82)
     } else if resp.hovered() {
-        ui.visuals().widgets.hovered
+        accent.gamma_multiply(0.90)
     } else {
-        ui.visuals().widgets.inactive
+        accent
     };
-    ui.painter()
-        .rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
-    ui.painter().rect_stroke(
-        rect,
-        visuals.corner_radius,
-        visuals.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
+    let stroke = if resp.hovered() || resp.is_pointer_button_down_on() {
+        egui::Stroke::new(m.hairline.max(1.0), accent.gamma_multiply(0.7))
+    } else {
+        egui::Stroke::new(m.hairline.max(1.0), Color32::TRANSPARENT)
+    };
+    if resp.hovered() && !resp.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            rect.translate(egui::vec2(0.0, 1.0)),
+            rounding,
+            Color32::from_black_alpha(14),
+        );
+    }
+    ui.painter().rect_filled(rect, rounding, fill);
+    if stroke.color != Color32::TRANSPARENT {
+        ui.painter()
+            .rect_stroke(rect, rounding, stroke, egui::StrokeKind::Inside);
+    }
     let inner = rect.shrink2(egui::vec2(pad_x, 0.0));
-    paint_optical_centered_text(ui.painter(), inner, text, font, visuals.fg_stroke.color);
+    paint_optical_centered_text(ui.painter(), inner, text, font, Color32::WHITE);
     if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+fn empty_primary_button(ui: &mut egui::Ui, text: &str, accent: Color32, metrics: Metrics) -> bool {
+    let font = egui::FontId::proportional(13.0);
+    let pad_x = 16.0;
+    let h = 30.0;
+    let w = ui.fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    }) + pad_x * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let rounding = egui::CornerRadius::same(metrics.radius_md as u8);
+    let is_down = resp.is_pointer_button_down_on();
+    let hovered = resp.hovered();
+    let fill = if is_down {
+        accent.gamma_multiply(0.82)
+    } else if hovered {
+        accent.gamma_multiply(0.90)
+    } else {
+        accent
+    };
+    let draw_rect = if hovered && !is_down {
+        rect.translate(egui::vec2(0.0, -1.0))
+    } else {
+        rect
+    };
+    if hovered && !is_down {
+        ui.painter().rect_filled(
+            rect.translate(egui::vec2(0.0, 1.0)),
+            rounding,
+            metrics.shadow_sm.color.gamma_multiply(0.6),
+        );
+        let shadow = metrics.shadow_sm;
+        let _ = shadow;
+    } else if hovered && is_down {
+        ui.painter()
+            .rect_filled(rect, rounding, Color32::from_black_alpha(8));
+    }
+    ui.painter().rect_filled(draw_rect, rounding, fill);
+    let stroke_col = if hovered || is_down {
+        accent.gamma_multiply(0.6)
+    } else {
+        Color32::TRANSPARENT
+    };
+    if stroke_col != Color32::TRANSPARENT {
+        ui.painter().rect_stroke(
+            draw_rect,
+            rounding,
+            egui::Stroke::new(metrics.hairline.max(1.0), stroke_col),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let inner = draw_rect.shrink2(egui::vec2(pad_x, 0.0));
+    paint_optical_centered_text(ui.painter(), inner, text, font, Color32::WHITE);
+    if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.clicked()
@@ -1033,7 +1284,7 @@ fn theme_chip(
         rect,
         rounding,
         if selected {
-            accent.gamma_multiply(0.15)
+            accent.gamma_multiply(0.12)
         } else {
             Color32::TRANSPARENT
         },
@@ -1042,7 +1293,7 @@ fn theme_chip(
         rect,
         rounding,
         egui::Stroke::new(
-            1.0,
+            if selected { 1.5 } else { 1.0 },
             if selected {
                 accent.gamma_multiply(0.6)
             } else {
@@ -1122,15 +1373,14 @@ fn fit_combo_text(ui: &mut egui::Ui, text: &str, max_w: f32) -> String {
     s
 }
 
-/// Full-width 1px separator used between rows inside a settings group.
+/// Full-width hairline separator used between rows inside a settings group.
 fn hairline(ui: &mut egui::Ui, color: Color32) {
+    let m = Metrics::scaled(ui.ctx().pixels_per_point());
+    let h = m.hairline.max(1.0);
     let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(
-        rect.x_range(),
-        rect.center().y,
-        egui::Stroke::new(1.0, color),
-    );
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+    ui.painter()
+        .hline(rect.x_range(), rect.center().y, egui::Stroke::new(h, color));
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -1222,17 +1472,14 @@ impl eframe::App for MdbijouApp {
         let m = self.metrics(ctx);
         let accent = th.c.link;
         let rounded_md = egui::CornerRadius::same(m.radius_md as u8);
-        // A neutral "control" fill distinct from the code_bg group background so
-        // slider rails stay visible; also used as the default button fill.
-        let control_bg = match th.kind {
-            crate::theme::ThemeKind::Light => Color32::from_rgb(0xe9, 0xe9, 0xe9),
-            crate::theme::ThemeKind::Dark => Color32::from_rgb(0x3c, 0x3c, 0x3c),
-        };
+        let control_bg = th.c.surface_hover;
+        visuals.window_shadow = m.shadow_md;
+        visuals.popup_shadow = m.shadow_sm;
         visuals.widgets.noninteractive = egui::style::WidgetVisuals {
             bg_fill: th.c.code_bg,
             weak_bg_fill: Color32::TRANSPARENT,
             bg_stroke: egui::Stroke::new(1.0, th.c.table_border),
-            corner_radius: egui::CornerRadius::same(m.radius_sm as u8),
+            corner_radius: rounded_md,
             fg_stroke: egui::Stroke::new(1.0, fg),
             expansion: 0.0,
         };
@@ -1291,6 +1538,25 @@ impl eframe::App for MdbijouApp {
         // ------- table of contents -------
         let narrow = ctx.content_rect().width() < 800.0;
         self.toc_entries = toc::extract(&self.doc.blocks);
+        // Active TOC entry: smallest y >= 0, else first heading.
+        if self.heading_anchors.is_empty() {
+            self.toc_active_anchor = None;
+        } else {
+            let mut best: Option<&(String, egui::Rect)> = None;
+            for ha in &self.heading_anchors {
+                if ha.1.min.y >= 0.0 {
+                    match best {
+                        None => best = Some(ha),
+                        Some((_, r)) if ha.1.min.y < r.min.y => best = Some(ha),
+                        _ => {}
+                    }
+                }
+            }
+            let anchor = best
+                .map(|(a, _)| a.clone())
+                .unwrap_or_else(|| self.heading_anchors[0].0.clone());
+            self.toc_active_anchor = Some(anchor);
+        }
         let show_toc_panel = self.cfg.show_toc && !narrow;
         if show_toc_panel {
             egui::SidePanel::left("toc")
@@ -1303,9 +1569,82 @@ impl eframe::App for MdbijouApp {
                         .inner_margin(egui::Margin::symmetric(10, 10)),
                 )
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("目录").size(13.0).color(fg));
+                    ui.horizontal(|ui| {
+                        ink_centered_label(ui, "目录", egui::FontId::proportional(13.0), fg, 18.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let total = self.toc_entries.len();
+                            let count_text = if self.toc_filter.is_empty() {
+                                format!("{} 项", total)
+                            } else {
+                                let filtered = self
+                                    .toc_entries
+                                    .iter()
+                                    .filter(|e| {
+                                        e.title
+                                            .to_lowercase()
+                                            .contains(&self.toc_filter.to_lowercase())
+                                    })
+                                    .count();
+                                format!("{}/{}", filtered, total)
+                            };
+                            ink_centered_label(
+                                ui,
+                                &count_text,
+                                egui::FontId::proportional(11.0),
+                                th.c.muted,
+                                18.0,
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let has_filter = !self.toc_filter.is_empty();
+                        let btn_w = if has_filter { 18.0 } else { 0.0 };
+                        let avail = ui.available_width();
+                        let edit_w = (avail - btn_w - 4.0).max(40.0);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.toc_filter)
+                                .desired_width(edit_w)
+                                .font(egui::FontId::proportional(11.0)),
+                        );
+                        if self.toc_filter.is_empty() && !resp.has_focus() {
+                            let hint_font = egui::FontId::proportional(11.0);
+                            let hint_color = th.c.muted.gamma_multiply(0.55);
+                            let hint_rect = resp.rect.shrink2(egui::vec2(6.0, 0.0));
+                            paint_optical_left(
+                                ui.painter(),
+                                hint_rect,
+                                "筛选…",
+                                hint_font,
+                                hint_color,
+                            );
+                        }
+                        if has_filter {
+                            let (r, resp) = ui
+                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(
+                                    r,
+                                    egui::CornerRadius::same(4),
+                                    th.c.code_bg,
+                                );
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                r,
+                                regular::X,
+                                egui::FontId::proportional(10.0),
+                                th.c.muted,
+                            );
+                            if resp.clicked() {
+                                self.toc_filter.clear();
+                            }
+                        }
+                    });
                     ui.add_space(4.0);
                     ui.separator();
+                    ui.add_space(4.0);
                     self.show_toc_panel(ui);
                 });
         }
@@ -1325,15 +1664,13 @@ impl eframe::App for MdbijouApp {
                         {
                             ui.scroll_to_rect(*rect, Some(egui::Align::Center));
                         }
-                    } else {
-                        if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor) {
+                    } else if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor)
+                    {
+                        self.pending_editor_line = Some(line);
+                    } else if let Some(entry) = self.toc_entries.iter().find(|e| e.anchor == anchor)
+                    {
+                        if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
                             self.pending_editor_line = Some(line);
-                        } else if let Some(entry) =
-                            self.toc_entries.iter().find(|e| e.anchor == anchor)
-                        {
-                            if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
-                                self.pending_editor_line = Some(line);
-                            }
                         }
                     }
                 }
@@ -1375,14 +1712,22 @@ impl eframe::App for MdbijouApp {
                             .inner_margin(egui::Margin::symmetric(6, 8));
                         frame.show(ui, |ui| {
                             let c = muted3.gamma_multiply(alpha3);
-                            let resp = ui.add(
-                                egui::Button::new(RichText::new(icon3).size(12.0).color(c))
-                                    .frame(false),
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                rect,
+                                icon3,
+                                egui::FontId::proportional(12.0),
+                                c,
                             );
                             if resp.clicked() {
                                 self.toc_drawer_open = !self.toc_drawer_open;
                             }
-                            resp.on_hover_text(tip3);
+                            optical_tooltip(&resp, tip3);
                         });
                     });
             }
@@ -1442,16 +1787,24 @@ impl eframe::App for MdbijouApp {
                             frame.show(ui, |ui| {
                                 let mut btn_color = muted2;
                                 btn_color = btn_color.gamma_multiply(alpha);
-                                let resp = ui.add(
-                                    egui::Button::new(
-                                        RichText::new(icon).size(12.0).color(btn_color),
-                                    )
-                                    .frame(false),
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(18.0, 18.0),
+                                    egui::Sense::click(),
+                                );
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                paint_optical_centered_text(
+                                    ui.painter(),
+                                    rect,
+                                    icon,
+                                    egui::FontId::proportional(12.0),
+                                    btn_color,
                                 );
                                 if resp.clicked() {
                                     self.dispatch(Cmd::ToggleToc);
                                 }
-                                resp.on_hover_text(tip);
+                                optical_tooltip(&resp, tip);
                             });
                         });
                 }
@@ -1460,6 +1813,7 @@ impl eframe::App for MdbijouApp {
 
         // ------- status bar -------
         self.status_bar(ctx);
+        self.show_save_toast(ctx);
 
         // ------- settings page -------
         self.show_settings(ctx);
@@ -1479,11 +1833,128 @@ impl eframe::App for MdbijouApp {
 impl MdbijouApp {
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme().clone();
+        let bg = theme.c.background;
+        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+        if theme.id == "bijou-light" {
+            let noise_col = theme.c.muted.gamma_multiply(0.035);
+            let clip = ui.clip_rect().intersect(ui.max_rect());
+            if clip.is_positive() {
+                let step = 24.0;
+                let start_x = (clip.min.x - (clip.min.x % step)).max(clip.min.x - step);
+                let start_y = (clip.min.y - (clip.min.y % step)).max(clip.min.y - step);
+                let end_x = clip.max.x + step;
+                let end_y = clip.max.y + step;
+                let mut y = start_y;
+                while y < end_y {
+                    let mut x = start_x;
+                    while x < end_x {
+                        let p = egui::pos2(x + 3.0, y + 7.0);
+                        if clip.contains(p) {
+                            ui.painter().circle_filled(p, 0.5, noise_col);
+                        }
+                        let q = egui::pos2(x + 15.0, y + 18.0);
+                        if clip.contains(q) {
+                            ui.painter().circle_filled(q, 0.5, noise_col);
+                        }
+                        x += step;
+                    }
+                    y += step;
+                }
+            }
+        }
         // Responsive reading column (UI-MD-002): never grow beyond the window,
         // keep a stable small gutter on narrow windows, center on wide ones.
+        let m = Metrics::scaled(ui.ctx().pixels_per_point());
         let avail = ui.available_width().max(20.0);
-        let effective = self.cfg.content_width.min(avail - 2.0 * 12.0);
+        let capped = self.cfg.content_width.min(m.content_max);
+        let effective = capped.min(avail - 2.0 * 12.0);
         let pad = ((avail - effective) * 0.5).max(12.0);
+
+        let content_h_id = ui.id().with("preview_content_h");
+        let is_empty = self.doc.text.trim().is_empty();
+        if is_empty {
+            let mut do_open = false;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let viewport_h = ui.available_height().max(200.0);
+                    let empty_h = 180.0;
+                    let top = ((viewport_h - empty_h) / 2.0).max(24.0);
+                    ui.add_space(top);
+                    ui.horizontal(|ui| {
+                        ui.add_space(pad);
+                        ui.vertical(|ui| {
+                            ui.set_max_width(effective);
+                            ui.vertical_centered(|ui| {
+                                let muted_dim = theme.c.muted.gamma_multiply(0.25);
+                                let icon_galley = ui.fonts_mut(|f| {
+                                    f.layout_no_wrap(
+                                        regular::FILE_TEXT.to_owned(),
+                                        egui::FontId::proportional(48.0),
+                                        muted_dim,
+                                    )
+                                });
+                                let (icon_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(effective, 52.0),
+                                    egui::Sense::hover(),
+                                );
+                                paint_optical_centered_text(
+                                    ui.painter(),
+                                    icon_rect,
+                                    regular::FILE_TEXT,
+                                    egui::FontId::proportional(48.0),
+                                    muted_dim,
+                                );
+                                let _ = icon_galley;
+                                ui.add_space(10.0);
+                                let title_rect = ui
+                                    .allocate_exact_size(
+                                        egui::vec2(effective, 22.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                paint_optical_centered_text(
+                                    ui.painter(),
+                                    title_rect,
+                                    "开始书写",
+                                    egui::FontId::proportional(16.0),
+                                    theme.c.foreground,
+                                );
+                                ui.add_space(6.0);
+                                let sub_rect = ui
+                                    .allocate_exact_size(
+                                        egui::vec2(effective, 16.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                paint_optical_centered_text(
+                                    ui.painter(),
+                                    sub_rect,
+                                    "拖拽 Markdown 文件到窗口或直接输入",
+                                    egui::FontId::proportional(12.0),
+                                    theme.c.muted,
+                                );
+                                ui.add_space(18.0);
+                                ui.horizontal(|ui| {
+                                    let btn_w = 110.0;
+                                    let x_off = ((effective - btn_w) * 0.5).max(0.0);
+                                    ui.add_space(x_off);
+                                    if empty_primary_button(ui, "打开文件", theme.c.link, m) {
+                                        do_open = true;
+                                    }
+                                });
+                            });
+                        });
+                    });
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(content_h_id, empty_h + top));
+                });
+            if do_open {
+                self.dispatch(Cmd::Open);
+            }
+            self.heading_anchors.clear();
+            return;
+        }
 
         let toc_entries = self.toc_entries.clone();
         let mut rctx = RenderCtx::new(
@@ -1493,22 +1964,15 @@ impl MdbijouApp {
             effective,
             self.cfg.font_size,
             self.cfg.line_height,
-            Metrics::scaled(ui.ctx().pixels_per_point()),
+            m,
         );
         rctx.toc_entries = toc_entries;
-
-        // Vertically center the document when it is shorter than the
-        // viewport; taller documents stay top-aligned and scrollable. The
-        // content height is measured during rendering and stored for the next
-        // frame (one frame of lag, then stable).
         let viewport_h = ui.available_height();
-        let content_h_id = ui.id().with("preview_content_h");
         let stored_h = ui
             .ctx()
             .data_mut(|d| d.get_temp::<f32>(content_h_id))
             .unwrap_or(0.0);
         let top_pad = ((viewport_h - stored_h) / 2.0).max(0.0);
-
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1535,39 +1999,96 @@ impl MdbijouApp {
         let theme = self.theme().clone();
         let fg = theme.c.foreground;
         let muted = theme.c.muted;
+        let accent = theme.c.link;
+        let filter = self.toc_filter.clone();
+        let active = self.toc_active_anchor.clone();
         let entries = std::mem::take(&mut self.toc_entries);
-        if entries.is_empty() {
+        let filtered: Vec<TocEntry> = if filter.is_empty() {
+            entries.clone()
+        } else {
+            let lower = filter.to_lowercase();
+            entries
+                .iter()
+                .filter(|e| e.title.to_lowercase().contains(&lower))
+                .cloned()
+                .collect()
+        };
+        if filtered.is_empty() {
             ui.add_space(8.0);
-            ui.label(RichText::new("无标题").size(12.0).color(muted));
+            if entries.is_empty() {
+                ink_centered_label(ui, "无标题", egui::FontId::proportional(12.0), muted, 20.0);
+            } else {
+                ink_centered_label(ui, "无匹配", egui::FontId::proportional(12.0), muted, 20.0);
+                ui.add_space(4.0);
+                let (r, resp) =
+                    ui.allocate_exact_size(egui::vec2(72.0, 20.0), egui::Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        r,
+                        egui::CornerRadius::same(4),
+                        accent.gamma_multiply(0.08),
+                    );
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                paint_optical_centered_text(
+                    ui.painter(),
+                    r,
+                    "清空筛选",
+                    egui::FontId::proportional(11.0),
+                    accent,
+                );
+                if resp.clicked() {
+                    self.toc_filter.clear();
+                }
+            }
             self.toc_entries = entries;
             return;
         }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for entry in &entries {
+                for entry in &filtered {
+                    let is_active = active.as_deref() == Some(entry.anchor.as_str());
                     let indent = (entry.level.saturating_sub(1)) as f32 * 14.0;
                     let avail = ui.available_width();
                     let max_w = (avail - indent - 12.0).max(12.0);
                     let text = fit_combo_text(ui, &entry.title, max_w);
-                    let row_h = 24.0;
+                    let row_h = 28.0;
                     let (rect, resp) =
                         ui.allocate_exact_size(egui::vec2(avail, row_h), egui::Sense::click());
-                    if resp.hovered() {
+                    if is_active {
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(6),
+                            accent.gamma_multiply(0.08),
+                        );
+                    } else if resp.hovered() {
                         ui.painter().rect_filled(
                             rect,
                             egui::CornerRadius::same(5),
                             theme.c.code_bg,
                         );
+                    }
+                    if resp.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    let color = if resp.hovered() { fg } else { muted };
+                    if is_active {
+                        let bar_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.left(), rect.center().y - 8.0),
+                            egui::vec2(2.0, 16.0),
+                        );
+                        ui.painter()
+                            .rect_filled(bar_rect, egui::CornerRadius::same(1), accent);
+                    }
+                    let color = if is_active { fg } else { muted };
+                    let display_color = if resp.hovered() && !is_active {
+                        fg
+                    } else {
+                        color
+                    };
                     let font = egui::FontId::proportional(12.0);
-                    // Ink-optical vertical centering (AGENTS.md): the CJK galley
-                    // box carries a tall ascent, so geometric centering would
-                    // push the glyphs up.
-                    let galley =
-                        ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color));
+                    let galley = ui
+                        .fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), display_color));
                     let mut shift = egui::Vec2::ZERO;
                     if let Some(placed) = galley.rows.first() {
                         let ink = placed.row.visuals.mesh_bounds;
@@ -1577,8 +2098,11 @@ impl MdbijouApp {
                         }
                     }
                     let y = rect.center().y - galley.size().y / 2.0 + shift.y;
-                    ui.painter()
-                        .galley(egui::pos2(rect.left() + indent + 4.0, y), galley, color);
+                    ui.painter().galley(
+                        egui::pos2(rect.left() + indent + 4.0, y),
+                        galley,
+                        display_color,
+                    );
                     if resp.clicked() {
                         self.pending_toc_anchor = Some(entry.anchor.clone());
                     }
@@ -1619,8 +2143,6 @@ impl MdbijouApp {
         }
     }
 
-    /// Bottom 24px status bar: file path, word/char count, cursor (edit mode),
-    /// save feedback on the left; font size and theme quick switch on the right.
     fn status_bar(&mut self, ctx: &egui::Context) {
         if !self.cfg.show_status_bar {
             return;
@@ -1630,11 +2152,11 @@ impl MdbijouApp {
         let muted = theme.c.muted;
         let hairline = self.metrics(ctx).hairline;
         egui::TopBottomPanel::bottom("status")
-            .exact_height(24.0)
+            .exact_height(26.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme.c.surface)
-                    .inner_margin(egui::Margin::symmetric(10, 0)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ctx, |ui| {
                 let bar = ui.max_rect();
@@ -1646,79 +2168,251 @@ impl MdbijouApp {
                 let inner = ui.available_rect_before_wrap();
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        match &self.doc.path {
-                            Some(p) => {
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(p.display().to_string())
-                                                .size(11.0)
-                                                .color(muted),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .on_hover_text("在 Finder 中显示");
-                                if resp.clicked() {
-                                    reveal_in_finder(p);
-                                }
-                            }
-                            None => {
-                                ui.label(RichText::new("未命名").size(11.0).color(muted));
+                        let file_name = self
+                            .doc
+                            .path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "未命名".to_string());
+                        let folder_rect = egui::Rect::from_center_size(
+                            egui::pos2(ui.cursor().min.x + 8.0, bar.center().y),
+                            egui::vec2(24.0, 24.0),
+                        );
+                        let folder_resp = ui.interact(
+                            folder_rect,
+                            ui.id().with("status_folder"),
+                            egui::Sense::click(),
+                        );
+                        let folder_color = if folder_resp.hovered() { fg } else { muted };
+                        paint_optical_centered_text(
+                            ui.painter(),
+                            folder_rect,
+                            regular::FOLDER_NOTCH,
+                            egui::FontId::proportional(12.0),
+                            folder_color,
+                        );
+                        if folder_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if folder_resp.clicked() {
+                            if let Some(p) = self.doc.path.clone() {
+                                reveal_in_finder(&p);
                             }
                         }
+                        optical_tooltip(&folder_resp, "在 Finder 中显示");
+                        ui.add_space(18.0);
+                        ink_centered_label(
+                            ui,
+                            &file_name,
+                            egui::FontId::proportional(10.0),
+                            muted,
+                            26.0,
+                        );
+                        ui.add_space(10.0);
                         let words = self.doc.text.split_whitespace().count();
                         let chars = self.doc.text.chars().count();
-                        ui.label(
-                            RichText::new(format!("{words} 词 · {chars} 字符"))
-                                .size(11.0)
-                                .color(muted),
+                        let stats_icon_rect = egui::Rect::from_center_size(
+                            egui::pos2(ui.cursor().min.x + 6.0, bar.center().y),
+                            egui::vec2(14.0, 14.0),
+                        );
+                        paint_optical_centered_text(
+                            ui.painter(),
+                            stats_icon_rect,
+                            regular::TEXT_T,
+                            egui::FontId::proportional(10.0),
+                            muted,
+                        );
+                        ui.add_space(10.0);
+                        ink_centered_label(
+                            ui,
+                            &format!("{words} 词 · {chars} 字符"),
+                            egui::FontId::proportional(11.0),
+                            muted,
+                            26.0,
                         );
                         if self.view == View::Edit {
                             if let Some((line, col)) = self.cursor {
-                                ui.label(
-                                    RichText::new(format!("{line}:{col}")).size(11.0).color(fg),
+                                ui.add_space(8.0);
+                                ink_centered_label(
+                                    ui,
+                                    &format!("Ln {line}, Col {col}"),
+                                    egui::FontId::proportional(11.0),
+                                    fg,
+                                    26.0,
                                 );
-                            }
-                        }
-                        if let Some((expiry, msg, color)) = &self.feedback {
-                            if *expiry > Instant::now() {
-                                ui.label(RichText::new(msg).size(11.0).color(*color));
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(6.0);
-                            let minus = ui
-                                .add(
-                                    egui::Button::new(RichText::new("A-").size(11.0).color(muted))
-                                        .frame(false),
+                            let theme_text = self.theme().name.clone();
+                            let theme_w = ui.fonts_mut(|f| {
+                                f.layout_no_wrap(
+                                    theme_text.clone(),
+                                    egui::FontId::proportional(11.0),
+                                    fg,
                                 )
-                                .on_hover_text("减小字号");
-                            if minus.clicked() {
-                                self.adjust_font_size(-1.0);
+                                .size()
+                                .x
+                            });
+                            let (theme_rect, theme_resp) = ui.allocate_exact_size(
+                                egui::vec2(theme_w + 8.0, 18.0),
+                                egui::Sense::click(),
+                            );
+                            if theme_resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-                            let plus = ui
-                                .add(
-                                    egui::Button::new(RichText::new("A+").size(11.0).color(muted))
-                                        .frame(false),
-                                )
-                                .on_hover_text("增大字号");
-                            if plus.clicked() {
-                                self.adjust_font_size(1.0);
-                            }
-                            let th = ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(self.theme().name.clone()).size(11.0),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text("切换主题");
-                            if th.clicked() {
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                theme_rect,
+                                &theme_text,
+                                egui::FontId::proportional(11.0),
+                                fg,
+                            );
+                            optical_tooltip(&theme_resp, "切换主题");
+                            if theme_resp.clicked() {
                                 self.cycle_theme();
                             }
+                            let plus_rect = egui::Rect::from_center_size(
+                                egui::pos2(ui.cursor().min.x + 12.0 - 6.0, bar.center().y),
+                                egui::vec2(24.0, 24.0),
+                            );
+                            // We allocate via interact for larger hit area, paint inside.
+                            let plus_resp = ui.interact(
+                                plus_rect,
+                                ui.id().with("status_plus"),
+                                egui::Sense::click(),
+                            );
+                            let plus_color = if plus_resp.hovered() { fg } else { muted };
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                plus_rect,
+                                "A+",
+                                egui::FontId::proportional(11.0),
+                                plus_color,
+                            );
+                            if plus_resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if plus_resp.clicked() {
+                                self.adjust_font_size(1.0);
+                            }
+                            optical_tooltip(&plus_resp, "增大字号");
+                            ui.add_space(18.0);
+                            let minus_rect = egui::Rect::from_center_size(
+                                egui::pos2(ui.cursor().min.x + 12.0 - 6.0, bar.center().y),
+                                egui::vec2(24.0, 24.0),
+                            );
+                            let minus_resp = ui.interact(
+                                minus_rect,
+                                ui.id().with("status_minus"),
+                                egui::Sense::click(),
+                            );
+                            let minus_color = if minus_resp.hovered() { fg } else { muted };
+                            paint_optical_centered_text(
+                                ui.painter(),
+                                minus_rect,
+                                "A-",
+                                egui::FontId::proportional(11.0),
+                                minus_color,
+                            );
+                            if minus_resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if minus_resp.clicked() {
+                                self.adjust_font_size(-1.0);
+                            }
+                            optical_tooltip(&minus_resp, "减小字号");
+                            ui.add_space(18.0);
                         });
                     });
                 });
+            });
+    }
+
+    fn show_save_toast(&self, ctx: &egui::Context) {
+        let Some((expiry, msg, color)) = &self.feedback else {
+            return;
+        };
+        let now = Instant::now();
+        if *expiry <= now {
+            return;
+        }
+        let theme = self.theme().clone();
+        let metrics = self.metrics(ctx);
+        let top_h = 2.0 * crate::macos::traffic_light_center();
+        let remaining = (*expiry - now).as_secs_f32();
+        let total = 3.0_f32;
+        let progress = (remaining / total).clamp(0.0, 1.0);
+        let is_success = *color == theme.c.success;
+        let icon = if is_success {
+            regular::CHECK_CIRCLE
+        } else if *color == theme.c.error {
+            regular::X_CIRCLE
+        } else {
+            regular::INFO
+        };
+        let fade = ctx.animate_bool(egui::Id::new("save_toast"), true);
+        let slide = ctx.animate_value_with_time(egui::Id::new("save_toast_slide"), 1.0, 0.18);
+        let y_off = (1.0 - slide) * 12.0;
+        egui::Area::new(egui::Id::new("save_toast"))
+            .order(egui::Order::Foreground)
+            .anchor(
+                egui::Align2::CENTER_TOP,
+                egui::vec2(0.0, top_h + 8.0 + y_off),
+            )
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(fade);
+                let frame = egui::Frame::new()
+                    .fill(theme.c.surface)
+                    .corner_radius(metrics.radius_lg)
+                    .stroke(egui::Stroke::new(1.0, theme.c.hr))
+                    .shadow(metrics.shadow_md)
+                    .inner_margin(egui::Margin::symmetric(14, 8));
+                let inner = frame.show(ui, |ui| {
+                    let icon_font = egui::FontId::proportional(14.0);
+                    let msg_font = egui::FontId::proportional(12.0);
+                    let (icon_w, msg_w) = ui.fonts_mut(|f| {
+                        let ig = f.layout_no_wrap(icon.to_owned(), icon_font.clone(), *color);
+                        let mg =
+                            f.layout_no_wrap(msg.clone(), msg_font.clone(), theme.c.foreground);
+                        (ig.size().x, mg.size().x)
+                    });
+                    let slot_h = 18.0;
+                    let gap = 6.0;
+                    let total_w = icon_w + gap + msg_w;
+                    let (outer, _) =
+                        ui.allocate_exact_size(egui::vec2(total_w, slot_h), egui::Sense::hover());
+                    let icon_rect =
+                        egui::Rect::from_min_size(outer.min, egui::vec2(icon_w, slot_h));
+                    paint_optical_centered_text(ui.painter(), icon_rect, icon, icon_font, *color);
+                    let msg_rect = egui::Rect::from_min_size(
+                        egui::pos2(icon_rect.max.x + gap, outer.min.y),
+                        egui::vec2(msg_w, slot_h),
+                    );
+                    paint_optical_centered_text(
+                        ui.painter(),
+                        msg_rect,
+                        msg,
+                        msg_font,
+                        theme.c.foreground,
+                    );
+                });
+                let rect = inner.response.rect;
+                let bg_bar = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + 6.0, rect.bottom() - 2.0),
+                    egui::pos2(rect.right() - 6.0, rect.bottom()),
+                );
+                ui.painter()
+                    .rect_filled(bg_bar, 1.0, theme.c.hr.gamma_multiply(0.5));
+                let fill_w = (bg_bar.width() * progress).max(0.0);
+                let fill_rect = egui::Rect::from_min_max(
+                    bg_bar.min,
+                    egui::pos2(bg_bar.min.x + fill_w, bg_bar.max.y),
+                );
+                ui.painter().rect_filled(fill_rect, 1.0, *color);
+                ctx.request_repaint();
             });
     }
 
@@ -1803,10 +2497,34 @@ fn base_dir_for(doc: &Document) -> PathBuf {
 #[cfg(target_os = "macos")]
 fn reveal_in_finder(path: &std::path::Path) {
     let _ = std::process::Command::new("open")
-        .arg("-R")
+        .args(["-R", "--"])
         .arg(path)
         .spawn();
 }
 
 #[cfg(not(target_os = "macos"))]
 fn reveal_in_finder(_path: &std::path::Path) {}
+
+#[cfg(test)]
+mod optical_single_system {
+    #[test]
+    fn chrome_uses_only_optical_system() {
+        let src = include_str!("app.rs");
+        let p1 = ["on_hover", "_text"].concat();
+        let p3 = ["painter.text", "("].concat();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("///") || t.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !line.contains(&p1),
+                "single-system violation: use optical_tooltip, found {line}"
+            );
+            assert!(
+                !line.contains(&p3),
+                "single-system violation: raw painter.text banned in chrome, found {line}"
+            );
+        }
+    }
+}

@@ -27,6 +27,12 @@ mod toc;
 use config::View;
 
 fn print_help() {
+    let themes: Vec<String> = theme::ThemeRegistry::new()
+        .themes
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    let theme_list = themes.join("|");
     println!(
         "mdbijou {} — lightweight Markdown reader + simple editor\n\
          \n\
@@ -35,11 +41,12 @@ fn print_help() {
          \n\
          OPTIONS:\n\
          \x20 --edit            open directly in the editor view\n\
-         \x20 --theme <id>      use a specific theme (github-light|github-dark|sepia)\n\
+         \x20 --theme <id>      use a specific theme ({})\n\
          \x20 --list-themes     list builtin themes and exit\n\
          \x20 --help            show this help\n\
          \x20 --version         show version\n",
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        theme_list
     );
 }
 

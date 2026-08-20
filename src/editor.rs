@@ -11,9 +11,11 @@
 use crate::config::Config;
 use crate::document::Document;
 use crate::highlight::Highlighter;
-use crate::theme::Theme;
-use egui::text::{LayoutJob, TextFormat};
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextEdit, Ui};
+use crate::theme::{Metrics, Theme};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
+use egui::text_edit::TextEditState;
+use egui::{Color32, CornerRadius, FontId, Margin, Pos2, Rect, Sense, Stroke, TextEdit, Ui};
+use egui_phosphor::regular;
 
 /// Whether a line is Markdown or part of a fenced code block.
 #[derive(Debug, Clone)]
@@ -90,6 +92,120 @@ impl<'a> Editor<'a> {
         let te_id = ui.id().with("md_editor_source");
         let mut te_changed = false;
 
+        // ---- floating Markdown shortcut bar (Phase 2b) ----
+        let metrics = Metrics::scaled(ui.ctx().pixels_per_point());
+        // Wrap in a Frame that feels like paper: surface fill, hairline hr,
+        // radius_md, symmetric padding, shadow_sm.
+        let mut pending_insert: Option<String> = None;
+        egui::Frame::new()
+            .fill(self.theme.c.surface)
+            .stroke(Stroke::new(metrics.hairline, self.theme.c.hr))
+            .corner_radius(CornerRadius::same(metrics.radius_md as u8))
+            .inner_margin(Margin::symmetric(6, 4))
+            .shadow(metrics.shadow_sm)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                    let btns: [(&str, &str, &str); 5] = [
+                        (regular::TEXT_H_ONE, "插入标题 (# )", "# "),
+                        (regular::TEXT_B, "插入加粗 (**)", "**粗体**"),
+                        (regular::TEXT_ITALIC, "插入斜体 (*)", "*斜体*"),
+                        (
+                            regular::LINK,
+                            "插入链接 []()",
+                            "[文本](https://example.com)",
+                        ),
+                        (regular::CODE, "插入行内代码 ``", "`代码`"),
+                    ];
+                    for (glyph, tip, snippet) in btns {
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
+                        if resp.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::same(4),
+                                self.theme.c.code_bg,
+                            );
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.is_pointer_button_down_on() {
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::same(4),
+                                self.theme.c.code_bg.gamma_multiply(0.9),
+                            );
+                        }
+                        let icon_color = if resp.hovered() {
+                            fg
+                        } else {
+                            self.theme.c.muted
+                        };
+                        crate::app::paint_optical_centered_text(
+                            ui.painter(),
+                            rect,
+                            glyph,
+                            FontId::proportional(12.0),
+                            icon_color,
+                        );
+                        if resp.clicked() {
+                            pending_insert = Some(snippet.to_string());
+                        }
+                        if resp.hovered() {
+                            resp.on_hover_ui(|ui| {
+                                let font = egui::FontId::proportional(12.0);
+                                let col = ui.visuals().text_color();
+                                let g = ui.fonts_mut(|f| {
+                                    f.layout_no_wrap(tip.to_owned(), font.clone(), col)
+                                });
+                                let (r, _) = ui.allocate_exact_size(g.size(), egui::Sense::hover());
+                                crate::app::paint_optical_centered_text(
+                                    ui.painter(),
+                                    r,
+                                    tip,
+                                    font,
+                                    col,
+                                );
+                            });
+                        }
+                    }
+                });
+            });
+        if let Some(snippet) = pending_insert {
+            let total_chars = doc.text.chars().count();
+            let raw_idx = egui::TextEdit::load_state(ui.ctx(), te_id)
+                .and_then(|s| s.cursor.char_range())
+                .map(|r| r.primary.index)
+                .unwrap_or(total_chars);
+            let char_idx = raw_idx.min(total_chars);
+            let byte_idx = doc
+                .text
+                .char_indices()
+                .nth(char_idx)
+                .map(|(i, _)| i)
+                .unwrap_or(doc.text.len());
+            debug_assert!(doc.text.is_char_boundary(byte_idx));
+            doc.text.insert_str(byte_idx, &snippet);
+            doc.dirty = true;
+            te_changed = true;
+            // Move cursor to end of inserted snippet.
+            let new_char_idx = char_idx + snippet.chars().count();
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                let cc = CCursor::new(new_char_idx);
+                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+            } else {
+                // No prior state: create one with cursor at new position.
+                let mut state = TextEditState::default();
+                let cc = CCursor::new(new_char_idx);
+                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+            }
+        }
+
+        ui.add_space(6.0);
+
         // Wrap width actually used by the TextEdit galley in the previous
         // frame; used to predict wrapped row heights for the gutter.
         let wrap_id = te_id.with("wrap_w");
@@ -122,6 +238,16 @@ impl<'a> Editor<'a> {
         let content_h = total_rows as f32 * row_h + 12.0; // + TextEdit vertical margins
         let top_pad = ((ui.available_height() - content_h) / 2.0).max(0.0);
 
+        // Current line for gutter highlight and background highlight.
+        let current_line = if highlight_on {
+            egui::TextEdit::load_state(ui.ctx(), te_id)
+                .and_then(|s| s.cursor.char_range())
+                .map(|r| count_newlines(&doc.text, r.primary.index))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -135,15 +261,28 @@ impl<'a> Editor<'a> {
                             egui::vec2(gutter_w, row_h * total_rows as f32),
                             Sense::hover(),
                         );
+                        let mono_gutter = FontId::monospace(12.0);
+                        let muted_soft = self.theme.c.muted.gamma_multiply(0.75);
                         let mut y = gutter_rect.min.y;
                         for (i, &rows) in rows_per_line.iter().enumerate() {
-                            ui.painter().text(
-                                Pos2::new(gutter_rect.max.x, y + row_h * 0.5),
-                                Align2::RIGHT_CENTER,
-                                (i + 1).to_string(),
-                                mono.clone(),
-                                self.theme.c.muted,
-                            );
+                            let is_current = highlight_on && i == current_line;
+                            let color = if is_current { fg } else { muted_soft };
+                            let text = (i + 1).to_string();
+                            let galley = ui.fonts_mut(|f| {
+                                f.layout_no_wrap(text.clone(), mono_gutter.clone(), color)
+                            });
+                            let mut shift_y = 0.0;
+                            if let Some(placed) = galley.rows.first() {
+                                let ink = placed.row.visuals.mesh_bounds;
+                                if ink.is_finite() && ink.height() > 0.0 {
+                                    let ink_center_y = placed.pos.y + ink.center().y;
+                                    shift_y = galley.rect.center().y - ink_center_y;
+                                }
+                            }
+                            let slot_center_y = y + row_h * rows as f32 * 0.5;
+                            let gy = slot_center_y - galley.size().y / 2.0 + shift_y;
+                            let gx = gutter_rect.max.x - galley.size().x;
+                            ui.painter().galley(egui::pos2(gx, gy), galley, color);
                             y += row_h * rows as f32;
                         }
                         // Gutter separator line spanning the full source height.
@@ -153,20 +292,12 @@ impl<'a> Editor<'a> {
                                 Pos2::new(x, gutter_rect.min.y),
                                 Pos2::new(x, gutter_rect.max.y),
                             ],
-                            Stroke::new(1.0, self.theme.c.table_border),
+                            Stroke::new(metrics.hairline, self.theme.c.hr.gamma_multiply(0.7)),
                         );
                     }
 
                     // Current-line highlight (behind the text), spanning all
                     // wrapped rows of the logical line.
-                    let current_line = if highlight_on {
-                        egui::TextEdit::load_state(ui.ctx(), te_id)
-                            .and_then(|s| s.cursor.char_range())
-                            .map(|r| count_newlines(&doc.text, r.primary.index))
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
                     if highlight_on {
                         let y = ui.cursor().top()
                             + row_h
@@ -179,7 +310,11 @@ impl<'a> Editor<'a> {
                             Pos2::new(ui.cursor().min.x, y),
                             egui::vec2(ui.available_width(), h),
                         );
-                        ui.painter().rect_filled(hl_rect, 0.0, self.theme.c.code_bg);
+                        ui.painter().rect_filled(
+                            hl_rect,
+                            CornerRadius::same(3),
+                            self.theme.c.code_bg.gamma_multiply(0.6),
+                        );
                     }
 
                     ui.style_mut().visuals.override_text_color = Some(fg);
@@ -214,10 +349,15 @@ impl<'a> Editor<'a> {
                         .frame(true)
                         .background_color(bg)
                         .text_color(fg)
-                        .margin(egui::Margin::symmetric(8, 6));
+                        .margin(Margin::symmetric(10, 8));
                     let out = te.show(ui);
-                    te_changed = out.response.changed();
-                    if te_changed {
+                    if out.response.changed() {
+                        te_changed = true;
+                    }
+                    if te_changed && !doc.dirty {
+                        doc.dirty = true;
+                    }
+                    if out.response.changed() {
                         doc.dirty = true;
                     }
                 });

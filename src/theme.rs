@@ -9,6 +9,7 @@ pub struct Metrics {
     pub radius_sm: f32, // 4  small buttons, capsules, code blocks
     pub radius_md: f32, // 8  cards, inputs, inner segmented slots
     pub radius_lg: f32, // 12 settings card, dialogs, outer segmented control
+    pub radius_xl: f32, // 16 window-level, large cards
     #[allow(dead_code)] // spacing tokens consumed incrementally (P1)
     pub space_xs: f32, // 4
     #[allow(dead_code)]
@@ -18,6 +19,9 @@ pub struct Metrics {
     #[allow(dead_code)]
     pub space_lg: f32, // 20
     pub hairline: f32,  // 1 physical px
+    pub shadow_sm: egui::epaint::Shadow,
+    pub shadow_md: egui::epaint::Shadow,
+    pub content_max: f32, // 720 reading column max width
 }
 
 impl Default for Metrics {
@@ -26,11 +30,25 @@ impl Default for Metrics {
             radius_sm: 4.0,
             radius_md: 8.0,
             radius_lg: 12.0,
+            radius_xl: 16.0,
             space_xs: 4.0,
             space_sm: 8.0,
             space_md: 12.0,
             space_lg: 20.0,
             hairline: 1.0,
+            shadow_sm: egui::epaint::Shadow {
+                offset: [0, 1],
+                blur: 4,
+                spread: 0,
+                color: Color32::from_black_alpha(24),
+            },
+            shadow_md: egui::epaint::Shadow {
+                offset: [0, 8],
+                blur: 24,
+                spread: 0,
+                color: Color32::from_black_alpha(60),
+            },
+            content_max: 720.0,
         }
     }
 }
@@ -82,6 +100,10 @@ pub struct Colors {
     /// Elevated surface (slightly lighter/darker than background): status bar,
     /// sidebars, floating toolbars.
     pub surface: Color32,
+    /// Hovered surface variant (one step above `surface`).
+    pub surface_hover: Color32,
+    /// Keyboard focus ring / accent ring.
+    pub focus: Color32,
     /// Positive feedback (save success etc.).
     pub success: Color32,
     /// Negative feedback (save failure etc.).
@@ -125,6 +147,8 @@ pub fn builtin(id: &str) -> Option<Theme> {
         "github-light" => Some(github_light()),
         "github-dark" => Some(github_dark()),
         "sepia" => Some(sepia()),
+        "bijou-light" => Some(bijou_light()),
+        "bijou-dark" => Some(bijou_dark()),
         _ => None,
     }
 }
@@ -134,6 +158,8 @@ pub fn builtin_ids() -> Vec<(&'static str, &'static str, ThemeKind)> {
         ("github-light", "GitHub Light", ThemeKind::Light),
         ("github-dark", "GitHub Dark", ThemeKind::Dark),
         ("sepia", "Sepia", ThemeKind::Light),
+        ("bijou-light", "Bijou Light", ThemeKind::Light),
+        ("bijou-dark", "Bijou Dark", ThemeKind::Dark),
     ]
 }
 
@@ -156,6 +182,8 @@ fn github_light() -> Theme {
         selection_bg: hex("#b6d7ff"),
         image_bg: hex("#f6f8fa"),
         surface: hex("#f6f8fa"),
+        surface_hover: hex("#eff2f5"),
+        focus: hex("#0969da"),
         success: Color32::from_rgb(70, 170, 90),
         error: Color32::from_rgb(220, 90, 70),
     };
@@ -202,6 +230,8 @@ fn github_dark() -> Theme {
         selection_bg: hex("#3a6ea5"),
         image_bg: hex("#161b22"),
         surface: hex("#161b22"),
+        surface_hover: hex("#1e242d"),
+        focus: hex("#58a6ff"),
         success: Color32::from_rgb(63, 185, 80),
         error: Color32::from_rgb(248, 81, 73),
     };
@@ -248,6 +278,8 @@ fn sepia() -> Theme {
         selection_bg: hex("#cbb893"),
         image_bg: hex("#efe4c8"),
         surface: hex("#efe4c8"),
+        surface_hover: hex("#e8ddbc"),
+        focus: hex("#8b5a00"),
         success: Color32::from_rgb(70, 170, 90),
         error: Color32::from_rgb(220, 90, 70),
     };
@@ -270,6 +302,102 @@ fn sepia() -> Theme {
         id: "sepia".into(),
         name: "Sepia".into(),
         kind: ThemeKind::Light,
+        c,
+        syntax,
+    }
+}
+
+fn bijou_light() -> Theme {
+    let c = Colors {
+        background: hex("#FCFCF9"),
+        foreground: hex("#1A1E23"),
+        heading: hex("#11151A"),
+        muted: hex("#6B7785"),
+        code_fg: hex("#1A1E23"),
+        code_bg: hex("#F2EFE6"),
+        blockquote_fg: hex("#6B7785"),
+        blockquote_bar: hex("#0A7D6B"),
+        quote_bg: hex("#FDFCF8"),
+        link: hex("#0A7D6B"),
+        table_border: hex("#E8E0D0"),
+        table_header_bg: hex("#F2EFE6"),
+        stripe_bg: hex("#F9F6F0"),
+        hr: hex("#E8E0D0"),
+        selection_bg: hex("#B8E6DD"),
+        image_bg: hex("#F2EFE6"),
+        surface: hex("#F6F3EB"),
+        surface_hover: hex("#EDE9DF"),
+        focus: hex("#0A7D6B"),
+        success: hex("#2DA44E"),
+        error: hex("#CF222E"),
+    };
+    let syntax = SyntaxColors {
+        comment: hex("#8A9AAD"),
+        keyword: hex("#B42318"),
+        string: hex("#7A5A00"),
+        number: hex("#0A7D6B"),
+        function: hex("#6B4CA8"),
+        typ: hex("#8B5A00"),
+        variable: hex("#1A1E23"),
+        operator: hex("#1A1E23"),
+        punctuation: hex("#6B7785"),
+        constant: hex("#0A7D6B"),
+        markup_heading: hex("#0A7D6B"),
+        markup_link: hex("#0A7D6B"),
+        markup_code: hex("#1A1E23"),
+    };
+    Theme {
+        id: "bijou-light".into(),
+        name: "Bijou Light".into(),
+        kind: ThemeKind::Light,
+        c,
+        syntax,
+    }
+}
+
+fn bijou_dark() -> Theme {
+    let c = Colors {
+        background: hex("#121416"),
+        foreground: hex("#E6E8EB"),
+        heading: hex("#F0F3F6"),
+        muted: hex("#8B95A1"),
+        code_fg: hex("#E6E8EB"),
+        code_bg: hex("#1E242B"),
+        blockquote_fg: hex("#8B95A1"),
+        blockquote_bar: hex("#2DD4BF"),
+        quote_bg: hex("#181D22"),
+        link: hex("#2DD4BF"),
+        table_border: hex("#2A3038"),
+        table_header_bg: hex("#1E242B"),
+        stripe_bg: hex("#1A1F26"),
+        hr: hex("#2A3038"),
+        selection_bg: hex("#1E5A52"),
+        image_bg: hex("#1E242B"),
+        surface: hex("#1B1F24"),
+        surface_hover: hex("#242A32"),
+        focus: hex("#2DD4BF"),
+        success: hex("#2DD4BF"),
+        error: hex("#F85149"),
+    };
+    let syntax = SyntaxColors {
+        comment: hex("#6B7A8A"),
+        keyword: hex("#FF7B8A"),
+        string: hex("#7EE0D1"),
+        number: hex("#5EEAD4"),
+        function: hex("#C4A6FF"),
+        typ: hex("#FFD580"),
+        variable: hex("#E6E8EB"),
+        operator: hex("#2DD4BF"),
+        punctuation: hex("#8B95A1"),
+        constant: hex("#5EEAD4"),
+        markup_heading: hex("#5EEAD4"),
+        markup_link: hex("#2DD4BF"),
+        markup_code: hex("#E6E8EB"),
+    };
+    Theme {
+        id: "bijou-dark".into(),
+        name: "Bijou Dark".into(),
+        kind: ThemeKind::Dark,
         c,
         syntax,
     }
