@@ -24,8 +24,10 @@ First public release: a lightweight native macOS Markdown reader + simple editor
 ### Changed
 
 - Release build is ~**7.2 MB**; cold startup (spawn-to-alive) is ~**16–22 ms** (Apple Silicon)
+- Process: enforce `CHANGELOG.md` update and postmortem assessment on every PR via `AGENTS.md` _(PR [#12](https://github.com/sunny0826/mdbijou/pull/12) by [@sunny0826](https://github.com/sunny0826))_
 
 ### Fixed
 
 - Markdown IR parse and preview rendering issues with lists, tables, links, HTML, images, and the scrollbar
   _(PR [#1](https://github.com/sunny0826/mdbijou/pull/1) by [@sunny0826](https://github.com/sunny0826/mdbijou))_
+- Status bar: remove duplicate filename (already shown in title bar) and fix word-count `T` icon rendering smaller than adjacent text _(PR [#12](https://github.com/sunny0826/mdbijou/pull/12) by [@sunny0826](https://github.com/sunny0826))_
