@@ -66,6 +66,7 @@ pub struct EditorResult {
     pub changed: bool,
     /// 1-based (line, column) of the cursor, when a cursor exists.
     pub cursor: Option<(usize, usize)>,
+    pub anchor_jump: Option<String>,
 }
 
 impl<'a> Editor<'a> {
@@ -78,6 +79,7 @@ impl<'a> Editor<'a> {
         ui: &mut Ui,
         doc: &mut Document,
         hl: &mut dyn Highlighter,
+        scroll_to_line: Option<usize>,
     ) -> EditorResult {
         let fg = self.theme.c.foreground;
         let bg = self.theme.c.background;
@@ -248,10 +250,33 @@ impl<'a> Editor<'a> {
             0
         };
 
+        if let Some(line) = scroll_to_line {
+            let char_idx: usize = doc
+                .text
+                .lines()
+                .take(line)
+                .map(|l| l.chars().count() + 1)
+                .sum();
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                let cc = CCursor::new(char_idx);
+                state.cursor.set_char_range(Some(CCursorRange::one(cc)));
+                state.store(ui.ctx(), te_id);
+                ui.ctx().memory_mut(|m| m.request_focus(te_id));
+                ui.ctx().request_repaint();
+            }
+        }
+
+        let mut anchor_jump: Option<String> = None;
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(top_pad);
+                let scroll_target_y = scroll_to_line.map(|line| {
+                    let idx = line.min(rows_per_line.len().saturating_sub(1));
+                    let y_off = rows_per_line[..idx].iter().sum::<usize>() as f32 * row_h;
+                    ui.cursor().min.y + y_off
+                });
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 2.0);
 
@@ -360,7 +385,34 @@ impl<'a> Editor<'a> {
                     if out.response.changed() {
                         doc.dirty = true;
                     }
+                    if out.response.clicked() {
+                        let cursor_idx = out
+                            .state
+                            .cursor
+                            .char_range()
+                            .map(|r| r.primary.index)
+                            .or_else(|| {
+                                egui::TextEdit::load_state(ui.ctx(), te_id)
+                                    .and_then(|s| s.cursor.char_range())
+                                    .map(|r| r.primary.index)
+                            });
+                        if let Some(idx) = cursor_idx {
+                            if let Some(anchor) = find_anchor_at_char(&doc.text, idx) {
+                                anchor_jump = Some(anchor);
+                            }
+                        }
+                    }
                 });
+                if let Some(y) = scroll_target_y {
+                    if let Some(line) = scroll_to_line {
+                        let h = row_h * rows_per_line.get(line).copied().unwrap_or(1) as f32;
+                        let rect = Rect::from_min_size(
+                            Pos2::new(ui.cursor().min.x, y),
+                            egui::vec2(ui.available_width(), h),
+                        );
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
+                }
             });
         let cursor = egui::TextEdit::load_state(ui.ctx(), te_id)
             .and_then(|s| s.cursor.char_range())
@@ -380,8 +432,85 @@ impl<'a> Editor<'a> {
         EditorResult {
             changed: te_changed,
             cursor,
+            anchor_jump,
         }
     }
+}
+
+fn percent_decode_editor(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut bytes = s.as_bytes().iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = bytes.next();
+            let lo = bytes.next();
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                let hex = [hi, lo];
+                if let Ok(hex_str) = std::str::from_utf8(&hex) {
+                    if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                        out.push(val as char);
+                        continue;
+                    }
+                }
+                out.push('%');
+                out.push(hi as char);
+                out.push(lo as char);
+            } else {
+                out.push('%');
+                if let Some(hi) = hi {
+                    out.push(hi as char);
+                }
+                if let Some(lo) = lo {
+                    out.push(lo as char);
+                }
+            }
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+fn find_anchor_at_char(text: &str, char_idx: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if char_idx > chars.len() {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '[' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && chars[j] != ']' {
+            j += 1;
+        }
+        if j >= chars.len() || j + 1 >= chars.len() || chars[j + 1] != '(' {
+            i += 1;
+            continue;
+        }
+        let paren_start = j + 1;
+        let mut k = paren_start + 1;
+        while k < chars.len() && chars[k] != ')' {
+            k += 1;
+        }
+        if k >= chars.len() {
+            i += 1;
+            continue;
+        }
+        let dest: String = chars[paren_start + 1..k].iter().collect();
+        let dest_trim = dest.trim();
+        let first_token = dest_trim.split_whitespace().next().unwrap_or("");
+        if let Some(stripped) = first_token.strip_prefix('#') {
+            let raw = stripped.trim();
+            if !raw.is_empty() && char_idx >= i && char_idx <= k {
+                return Some(percent_decode_editor(raw));
+            }
+        }
+        i = k + 1;
+    }
+    None
 }
 
 /// How many lines precede `char_idx` (for current-line highlight).

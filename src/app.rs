@@ -1657,20 +1657,18 @@ impl eframe::App for MdbijouApp {
                     .inner_margin(egui::Margin::symmetric(0, 8)),
             )
             .show(ctx, |ui| {
-                if let Some(anchor) = self.pending_toc_anchor.take() {
-                    if self.view == View::Preview {
-                        if let Some((_, rect)) =
-                            self.heading_anchors.iter().find(|(a, _)| *a == anchor)
+                if self.view == View::Edit {
+                    if let Some(anchor) = self.pending_toc_anchor.take() {
+                        if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor)
+                            .or_else(|| find_heading_line_by_anchor_fuzzy(&self.doc.text, &anchor))
                         {
-                            ui.scroll_to_rect(*rect, Some(egui::Align::Center));
-                        }
-                    } else if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor)
-                    {
-                        self.pending_editor_line = Some(line);
-                    } else if let Some(entry) = self.toc_entries.iter().find(|e| e.anchor == anchor)
-                    {
-                        if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
                             self.pending_editor_line = Some(line);
+                        } else if let Some(entry) =
+                            self.toc_entries.iter().find(|e| anchor_eq(&e.anchor, &anchor))
+                        {
+                            if let Some(line) = find_heading_line(&self.doc.text, &entry.title) {
+                                self.pending_editor_line = Some(line);
+                            }
                         }
                     }
                 }
@@ -1967,6 +1965,7 @@ impl MdbijouApp {
             m,
         );
         rctx.toc_entries = toc_entries;
+        let mut pending_anchor = self.pending_toc_anchor.take();
         let viewport_h = ui.available_height();
         let stored_h = ui
             .ctx()
@@ -1985,11 +1984,28 @@ impl MdbijouApp {
                         crate::render::render_document(ui, &self.doc, &mut rctx);
                     });
                 });
+                let anchor_opt = rctx
+                    .clicked_anchor
+                    .clone()
+                    .or_else(|| pending_anchor.clone());
+                if let Some(anchor) = anchor_opt {
+                    if let Some((_, rect)) = find_heading_rect(&rctx.heading_anchors, &anchor) {
+                        ui.scroll_to_rect(*rect, Some(egui::Align::Center));
+                        pending_anchor = None;
+                        rctx.clicked_anchor = None;
+                    } else {
+                        pending_anchor = Some(anchor);
+                        rctx.clicked_anchor = None;
+                    }
+                }
                 let measured = ui.cursor().min.y - content_top;
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(content_h_id, measured.max(0.0)));
             });
         self.heading_anchors = std::mem::take(&mut rctx.heading_anchors);
+        if let Some(a) = pending_anchor {
+            self.pending_toc_anchor = Some(a);
+        }
     }
 
     /// The TOC list, shared by the wide-window side panel and the narrow-window
@@ -2112,34 +2128,22 @@ impl MdbijouApp {
     }
 
     fn show_editor(&mut self, ui: &mut egui::Ui) {
-        if let Some(line) = self.pending_editor_line.take() {
-            let char_idx: usize = self
-                .doc
-                .text
-                .lines()
-                .take(line)
-                .map(|l| l.chars().count() + 1)
-                .sum();
-            let te_id = ui.id().with("md_editor_source");
-            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
-                let cc = egui::text::CCursor::new(char_idx);
-                state
-                    .cursor
-                    .set_char_range(Some(egui::text::CCursorRange::one(cc)));
-                state.store(ui.ctx(), te_id);
-                ui.ctx().memory_mut(|m| m.request_focus(te_id));
-                ui.ctx().request_repaint();
-            } else {
-                self.pending_editor_line = Some(line);
-            }
-        }
+        let pending = self.pending_editor_line.take();
         let theme = self.theme().clone();
         let mut editor = Editor::new(&self.cfg, &theme);
-        let res = editor.show(ui, &mut self.doc, &mut *self.hl);
+        let res = editor.show(ui, &mut self.doc, &mut *self.hl, pending);
         self.cursor = res.cursor;
         if res.changed {
             self.last_edit_saved = Instant::now();
             self.need_reparse = true;
+        }
+        if let Some(anchor) = res.anchor_jump {
+            if let Some(line) = find_heading_line_by_anchor(&self.doc.text, &anchor)
+                .or_else(|| find_heading_line_by_anchor_fuzzy(&self.doc.text, &anchor))
+            {
+                self.pending_editor_line = Some(line);
+                ui.ctx().request_repaint();
+            }
         }
     }
 
@@ -2485,6 +2489,80 @@ fn find_heading_line_by_anchor(text: &str, anchor: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn find_heading_line_by_anchor_fuzzy(text: &str, anchor: &str) -> Option<usize> {
+    use std::collections::HashMap;
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let after_hash = trimmed.trim_start_matches('#').trim_start();
+        if after_hash.is_empty() {
+            continue;
+        }
+        let slug = crate::toc::slugify(after_hash);
+        let count = used.entry(slug.clone()).or_insert(0);
+        *count += 1;
+        let cur_anchor = if *count == 1 {
+            slug
+        } else {
+            format!("{slug}-{}", *count)
+        };
+        if anchor_eq(&cur_anchor, anchor) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn anchor_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let sa = crate::toc::slugify(a);
+    let sb = crate::toc::slugify(b);
+    if sa == sb {
+        return true;
+    }
+    if sa.eq_ignore_ascii_case(&sb) {
+        return true;
+    }
+    if a == sb || b == sa {
+        return true;
+    }
+    if a.eq_ignore_ascii_case(&sb) || b.eq_ignore_ascii_case(&sa) {
+        return true;
+    }
+    false
+}
+
+fn find_heading_rect<'a>(
+    anchors: &'a [(String, egui::Rect)],
+    query: &str,
+) -> Option<&'a (String, egui::Rect)> {
+    if let Some(found) = anchors.iter().find(|(a, _)| a == query) {
+        return Some(found);
+    }
+    if let Some(found) = anchors.iter().find(|(a, _)| a.eq_ignore_ascii_case(query)) {
+        return Some(found);
+    }
+    let slug = crate::toc::slugify(query);
+    if let Some(found) = anchors.iter().find(|(a, _)| a == &slug) {
+        return Some(found);
+    }
+    if let Some(found) = anchors
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(&slug))
+    {
+        return Some(found);
+    }
+    anchors.iter().find(|(a, _)| anchor_eq(a, query))
 }
 
 fn base_dir_for(doc: &Document) -> PathBuf {
