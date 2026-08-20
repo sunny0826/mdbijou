@@ -11,6 +11,7 @@ use crate::images::ImageStore;
 use crate::theme::{Metrics, Theme};
 use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{pos2, vec2, Color32, CursorIcon, FontId, Rect, RichText, Sense, Stroke, Ui};
+use std::time::{Duration, Instant};
 
 /// Shared state needed across block rendering.
 pub struct RenderCtx<'a> {
@@ -106,8 +107,45 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             let color = ctx.theme.c.heading;
             let (job, links, strikes) =
                 build_inline_job(inlines, ctx, color, FontId::proportional(size));
-            ui.add_space(if *level <= 2 { 14.0 } else { 9.0 });
+            // Paper & Jewel: H1 24/12, H2 20/10, H3+ 14/8 — use Metrics tokens where available.
+            let top_space = match *level {
+                1 => 24.0, // metrics.space_lg + 4
+                2 => 20.0, // metrics.space_lg
+                _ => 14.0, // metrics.space_md + 2
+            };
+            ui.add_space(top_space);
             let rect = paint_job(ui, job, links, strikes, color, *align);
+            if *level == 1 {
+                let anchor_id =
+                    ui.id()
+                        .with(("heading-anchor", rect.min.x.to_bits(), rect.min.y.to_bits()));
+                let resp = ui.interact(rect, anchor_id, Sense::hover());
+                let hovered = resp.hovered();
+                let alpha = if hovered { 1.0 } else { 0.35 };
+                let anchor_color = ctx.theme.c.muted.gamma_multiply(alpha);
+                let font = FontId::proportional(11.0);
+                let galley =
+                    ui.fonts_mut(|f| f.layout_no_wrap("§".to_owned(), font.clone(), anchor_color));
+                let gw = galley.size().x;
+                let anchor_rect = egui::Rect::from_min_size(
+                    pos2(rect.max.x - 6.0 - gw, rect.center().y - 7.0),
+                    egui::vec2(gw, 14.0),
+                );
+                let mut shift = egui::Vec2::ZERO;
+                if let Some(placed) = galley.rows.first() {
+                    let ink = placed.row.visuals.mesh_bounds;
+                    if ink.is_finite() && ink.width() > 0.0 && ink.height() > 0.0 {
+                        let ink_center = placed.pos + ink.center().to_vec2();
+                        shift = galley.rect.center() - ink_center;
+                    }
+                }
+                let y = anchor_rect.center().y - galley.size().y / 2.0 + shift.y;
+                let x = anchor_rect.max.x - galley.size().x;
+                ui.painter().galley(egui::pos2(x, y), galley, anchor_color);
+                if hovered {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+            }
             // Record the heading's on-screen rect under its TOC anchor so the
             // TOC panel can scroll the preview to it. Entries are consumed in
             // document order, matching `toc::extract`'s traversal.
@@ -116,17 +154,27 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             }
             ctx.toc_cursor += 1;
             if *level <= 2 {
-                let (rect, _) = ui.allocate_exact_size(
-                    vec2(ui.available_width().min(ctx.content_width), 2.0),
+                ui.add_space(8.0);
+                let hairline_h = ctx.metrics.hairline.max(1.0);
+                let hr_color = ctx.theme.c.hr.gamma_multiply(0.7);
+                let (line_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width().min(ctx.content_width), hairline_h),
                     Sense::hover(),
                 );
-                ui.painter().rect_filled(rect, 0.0, ctx.theme.c.hr);
+                ui.painter().rect_filled(line_rect, 1.0, hr_color);
+                let bottom_extra = match *level {
+                    1 => 4.0,
+                    2 => 2.0,
+                    _ => 6.0,
+                };
+                ui.add_space(bottom_extra);
+            } else {
+                ui.add_space(8.0);
             }
-            ui.add_space(5.0);
         }
         Block::Paragraph { inlines, align } => {
-            ui.add_space(5.0);
-            // Standalone image paragraph -> real image block.
+            ui.add_space(7.0); // metrics.space_sm - 1 (paper breathing)
+                               // Standalone image paragraph -> real image block.
             if matches!(inlines.as_slice(), [Inline::Image { .. }]) {
                 if let Inline::Image { src, alt, width } = &inlines[0] {
                     if *align == Align::Center {
@@ -142,17 +190,17 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
                     build_inline_job(inlines, ctx, ctx.theme.c.foreground, ctx.body_font());
                 paint_job(ui, job, links, strikes, ctx.theme.c.foreground, *align);
             }
-            ui.add_space(5.0);
+            ui.add_space(7.0);
         }
         Block::CodeBlock { lang, text } => {
-            ui.add_space(8.0);
+            ui.add_space(ctx.metrics.space_sm);
             let is_mermaid = lang
                 .as_deref()
                 .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"));
             if !is_mermaid || !crate::mermaid::render(ui, text, ctx.theme, ctx.font_size) {
                 render_code_block(ui, lang.as_deref(), text, ctx);
             }
-            ui.add_space(8.0);
+            ui.add_space(ctx.metrics.space_sm);
         }
         Block::BlockQuote { blocks } => {
             ui.add_space(6.0);
@@ -164,12 +212,12 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             start,
             items,
         } => {
-            ui.add_space(4.0);
+            ui.add_space(ctx.metrics.space_xs);
             render_list(ui, *ordered, *start, items, ctx, depth);
             ui.add_space(7.0);
         }
         Block::TaskList { checked, items } => {
-            ui.add_space(4.0);
+            ui.add_space(ctx.metrics.space_xs);
             render_task_list(ui, checked, items, ctx, depth);
             ui.add_space(7.0);
         }
@@ -178,18 +226,23 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             align,
             rows,
         } => {
-            ui.add_space(8.0);
+            ui.add_space(ctx.metrics.space_sm);
             render_table(ui, header, align, rows, ctx);
-            ui.add_space(8.0);
+            ui.add_space(ctx.metrics.space_sm);
         }
         Block::ThematicBreak => {
-            ui.add_space(10.0);
-            let (rect, _) = ui.allocate_exact_size(
-                vec2(ui.available_width().min(ctx.content_width), 2.0),
-                Sense::hover(),
-            );
-            ui.painter().rect_filled(rect, 0.0, ctx.theme.c.hr);
-            ui.add_space(10.0);
+            ui.add_space(14.0);
+            let hairline_h = ctx.metrics.hairline.max(1.0);
+            let avail_w = ui.available_width().min(ctx.content_width);
+            let line_w = (avail_w * 0.6).max(80.0);
+            let pad = ((avail_w - line_w) / 2.0).max(24.0);
+            // Centered 60% width solid hr with breathing room; gradient fade approximated by centering.
+            ui.horizontal(|ui| {
+                ui.add_space(pad);
+                let (rect, _) = ui.allocate_exact_size(vec2(line_w, hairline_h), Sense::hover());
+                ui.painter().rect_filled(rect, 1.0, ctx.theme.c.hr);
+            });
+            ui.add_space(14.0);
         }
         Block::Html(raw) => match crate::html::html_blocks(raw) {
             Some(blocks) => render_blocks(ui, &blocks, ctx, depth),
@@ -532,49 +585,129 @@ fn paint_job(
 fn render_code_block(ui: &mut Ui, lang: Option<&str>, text: &str, ctx: &mut RenderCtx) {
     let body_font = FontId::monospace(ctx.font_size - 1.0);
     let body_height = (ctx.font_size - 1.0) * ctx.line_height;
-    let frame = egui::Frame::new()
+    let outer = egui::Frame::new()
         .fill(ctx.theme.c.code_bg)
         .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-        .corner_radius(ctx.metrics.radius_sm)
-        .inner_margin(egui::Margin::symmetric(12, 8));
-    frame.show(ui, |ui| {
-        // Fill the whole content column so short code blocks don't shrink.
-        ui.set_min_width(ui.available_width());
-        if let Some(lang) = lang {
-            ui.label(RichText::new(lang).small().color(ctx.theme.c.muted));
-            ui.add_space(2.0);
-        }
-        let fg = ctx.theme.c.foreground;
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            let lines: Vec<Line> = ctx.hl.code_block(lang, text);
-            for spans in lines {
-                if spans.iter().all(|s| s.text.is_empty()) {
-                    ui.add(egui::Label::new(RichText::new(" ").monospace()).selectable(false));
-                    continue;
-                }
-                let mut job = LayoutJob::default();
-                job.wrap.max_width = f32::INFINITY;
-                for sp in spans {
-                    let color = if sp.color == Color32::TRANSPARENT {
-                        fg
-                    } else {
-                        sp.color
-                    };
-                    job.append(
-                        &sp.text,
-                        0.0,
-                        TextFormat {
-                            font_id: body_font.clone(),
-                            line_height: Some(body_height),
-                            color,
-                            italics: sp.style & 2 != 0,
-                            ..Default::default()
-                        },
-                    );
-                }
-                ui.add(egui::Label::new(job).selectable(true));
-            }
+        .corner_radius(ctx.metrics.radius_md)
+        .shadow(ctx.metrics.shadow_sm)
+        .inner_margin(egui::Margin {
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 8,
         });
+    outer.show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        let header_h = 32.0;
+        let header_bg = ctx.theme.c.surface_hover.gamma_multiply(0.9);
+        let lang_label = lang
+            .map(|l| l.to_ascii_uppercase())
+            .unwrap_or_else(|| "CODE".to_string());
+        egui::Frame::new()
+            .fill(header_bg)
+            .corner_radius(egui::CornerRadius {
+                nw: ctx.metrics.radius_md as u8,
+                ne: ctx.metrics.radius_md as u8,
+                sw: 0,
+                se: 0,
+            })
+            .inner_margin(egui::Margin::symmetric(12, 0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.set_max_height(header_h);
+                ui.set_min_height(header_h);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(lang_label)
+                            .size(10.0)
+                            .color(ctx.theme.c.muted)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let copy_id = egui::Id::new(("code_copy", text));
+                        let copied_until = ui
+                            .ctx()
+                            .data_mut(|d| d.get_temp::<Instant>(copy_id))
+                            .unwrap_or_else(|| Instant::now() - Duration::from_secs(10));
+                        let is_copied = Instant::now() < copied_until;
+                        if is_copied {
+                            let remaining = copied_until.saturating_duration_since(Instant::now());
+                            ui.ctx().request_repaint_after(remaining);
+                        }
+                        let label = if is_copied { "已复制 ✔" } else { "复制" };
+                        let icon = if is_copied {
+                            egui_phosphor::regular::CHECK
+                        } else {
+                            egui_phosphor::regular::COPY
+                        };
+                        let txt_color = if is_copied {
+                            ctx.theme.c.success
+                        } else {
+                            ctx.theme.c.muted
+                        };
+                        let btn = egui::Button::new(
+                            RichText::new(format!("{icon} {label}"))
+                                .size(11.0)
+                                .color(txt_color),
+                        )
+                        .frame(false);
+                        let w = if is_copied { 82.0 } else { 64.0 };
+                        let resp = ui.add_sized(vec2(w, 22.0), btn);
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() {
+                            ui.ctx().copy_text(text.to_owned());
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(copy_id, Instant::now() + Duration::from_secs(2))
+                            });
+                            ui.ctx().request_repaint();
+                        }
+                    });
+                });
+            });
+        let hairline = ctx.metrics.hairline.max(1.0);
+        let (sep_rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), hairline), Sense::hover());
+        ui.painter().rect_filled(sep_rect, 0.0, ctx.theme.c.hr);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let fg = ctx.theme.c.foreground;
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    let lines: Vec<Line> = ctx.hl.code_block(lang, text);
+                    for spans in lines {
+                        if spans.iter().all(|s| s.text.is_empty()) {
+                            ui.add(
+                                egui::Label::new(RichText::new(" ").monospace()).selectable(false),
+                            );
+                            continue;
+                        }
+                        let mut job = LayoutJob::default();
+                        job.wrap.max_width = f32::INFINITY;
+                        for sp in spans {
+                            let color = if sp.color == Color32::TRANSPARENT {
+                                fg
+                            } else {
+                                sp.color
+                            };
+                            job.append(
+                                &sp.text,
+                                0.0,
+                                TextFormat {
+                                    font_id: body_font.clone(),
+                                    line_height: Some(body_height),
+                                    color,
+                                    italics: sp.style & 2 != 0,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        ui.add(egui::Label::new(job).selectable(true));
+                    }
+                });
+            });
     });
 }
 
@@ -592,33 +725,32 @@ fn render_list(
 ) {
     let indent = 14.0 * depth as f32;
     for (i, item) in items.iter().enumerate() {
-        let marker = if ordered {
-            format!("{}.", start + i as u64)
-        } else {
-            "•".to_string()
-        };
         ui.horizontal_top(|ui| {
             ui.add_space(indent);
             ui.allocate_ui_with_layout(
-                vec2(24.0, ctx.line_h(ctx.font_size)),
+                vec2(20.0, ctx.line_h(ctx.font_size)),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    // Match the paragraph's leading space so the marker and the
-                    // first text line share the same baseline (same font size).
-                    ui.add_space(5.0);
-                    ui.label(
-                        RichText::new(marker)
-                            .size(ctx.font_size)
-                            .color(ctx.theme.c.muted),
-                    );
+                    ui.add_space(7.0);
+                    if ordered {
+                        let marker = format!("{}.", start + i as u64);
+                        ui.label(RichText::new(marker).size(12.0).color(ctx.theme.c.muted));
+                    } else {
+                        let (rect, _) = ui.allocate_exact_size(
+                            vec2(20.0, ctx.line_h(ctx.font_size) - 2.0),
+                            Sense::hover(),
+                        );
+                        let center = pos2(rect.center().x, rect.min.y + 9.0);
+                        ui.painter().circle_filled(center, 2.5, ctx.theme.c.link);
+                    }
                 },
             );
             ui.vertical(|ui| {
-                render_blocks(ui, item, ctx, depth);
+                render_blocks(ui, item, ctx, depth + 1);
             });
         });
         if i + 1 < items.len() {
-            ui.add_space(3.0);
+            ui.add_space(4.0);
         }
     }
 }
@@ -636,39 +768,60 @@ fn render_task_list(
         ui.horizontal_top(|ui| {
             ui.add_space(indent);
             ui.allocate_ui_with_layout(
-                vec2(24.0, ctx.line_h(ctx.font_size)),
+                vec2(20.0, ctx.line_h(ctx.font_size)),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.add_space(5.0);
-                    let (fill, glyph) = if chk {
-                        (ctx.theme.c.link, "☑")
-                    } else {
-                        (ctx.theme.c.muted, "☐")
-                    };
+                    ui.add_space(7.0);
                     let (rect, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                    ui.painter().rect_stroke(
-                        rect,
-                        2.0,
-                        Stroke::new(1.4, fill),
-                        egui::StrokeKind::Inside,
-                    );
                     if chk {
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            glyph,
-                            FontId::proportional(13.0),
-                            fill,
+                        ui.painter()
+                            .rect_filled(rect, 4.0, ctx.theme.c.link.gamma_multiply(0.12));
+                        ui.painter().rect_stroke(
+                            rect,
+                            4.0,
+                            Stroke::new(1.4, ctx.theme.c.link),
+                            egui::StrokeKind::Inside,
+                        );
+                        let galley = ui.fonts_mut(|f| {
+                            f.layout_no_wrap(
+                                "✔".to_owned(),
+                                FontId::proportional(10.0),
+                                ctx.theme.c.link,
+                            )
+                        });
+                        let mut shift = egui::Vec2::ZERO;
+                        if let Some(placed) = galley.rows.first() {
+                            let ink = placed.row.visuals.mesh_bounds;
+                            if ink.is_finite() && ink.height() > 0.0 {
+                                let ink_center = placed.pos + ink.center().to_vec2();
+                                shift = galley.rect.center() - ink_center;
+                            }
+                        }
+                        let pos = rect.center() - galley.size() / 2.0 + shift;
+                        ui.painter().galley(pos, galley, ctx.theme.c.link);
+                        let shadow_rect = rect.expand(0.5);
+                        ui.painter().rect_stroke(
+                            shadow_rect,
+                            4.0,
+                            Stroke::new(1.0, Color32::from_black_alpha(12)),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else {
+                        ui.painter().rect_stroke(
+                            rect,
+                            4.0,
+                            Stroke::new(1.4, ctx.theme.c.muted.gamma_multiply(0.6)),
+                            egui::StrokeKind::Inside,
                         );
                     }
                 },
             );
             ui.vertical(|ui| {
-                render_blocks(ui, item, ctx, depth);
+                render_blocks(ui, item, ctx, depth + 1);
             });
         });
         if i + 1 < items.len() {
-            ui.add_space(3.0);
+            ui.add_space(4.0);
         }
     }
 }
@@ -680,18 +833,23 @@ fn render_task_list(
 fn render_blockquote(ui: &mut Ui, blocks: &[Block], ctx: &mut RenderCtx, depth: usize) {
     let frame = egui::Frame::new()
         .fill(ctx.theme.c.quote_bg)
-        .inner_margin(egui::Margin::symmetric(16, 8));
+        .corner_radius(ctx.metrics.radius_md)
+        .inner_margin(egui::Margin::symmetric(16, 10));
     let resp = frame.show(ui, |ui| {
         render_blocks(ui, blocks, ctx, depth);
     });
-    // Draw the left bar flush against the frame's left edge, at the *measured*
-    // height of the content (UI-MD-009).
     let rect = resp.response.rect;
     ui.painter().rect_filled(
-        Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)),
-        0.0,
+        Rect::from_min_max(rect.min, pos2(rect.min.x + 3.5, rect.max.y)),
+        1.5,
         ctx.theme.c.blockquote_bar,
     );
+    let inner_shadow = Rect::from_min_max(
+        pos2(rect.min.x + 3.5, rect.min.y),
+        pos2(rect.min.x + 4.5, rect.max.y),
+    );
+    ui.painter()
+        .rect_filled(inner_shadow, 0.0, Color32::from_black_alpha(6));
 }
 
 // ---------------------------------------------------------------------------
@@ -715,8 +873,6 @@ fn render_table(
     let pad_x = 7.0;
     let pad_y = 5.0;
     let row_h = ctx.line_h(ctx.font_size) + 2.0 * pad_y;
-
-    // Measure column widths from the widest cell in each column.
     let mut col_w = vec![0f32; ncols];
     let measure = |ui: &mut Ui, t: &str| -> f32 {
         ui.fonts_mut(|f| {
@@ -737,20 +893,20 @@ fn render_table(
     let avail = ui.available_width().max(20.0);
     let needs_scroll = total_w > avail;
     let total_h = (1 + rows.len()) as f32 * row_h;
-
-    // Paint the whole table into a single reserved rect so cell text and the
-    // border share the exact same origin (no per-row cursor drift).
+    let outer = egui::Frame::new()
+        .corner_radius(ctx.metrics.radius_md)
+        .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
+        .shadow(ctx.metrics.shadow_sm)
+        .inner_margin(egui::Margin::same(0));
     let paint = |ui: &mut Ui| {
         let origin = ui.cursor().min;
         let (table_rect, _) = ui.allocate_exact_size(vec2(total_w, total_h), Sense::hover());
-
         let mut x_offsets: Vec<f32> = Vec::with_capacity(ncols);
         let mut x = 0.0;
         for w in &cell_w {
             x_offsets.push(x);
             x += w;
         }
-
         let mut y = origin.y;
         paint_table_row(
             ui, ctx, header, align, origin.x, y, &x_offsets, &cell_w, row_h, true, false,
@@ -772,34 +928,29 @@ fn render_table(
             );
             y += row_h;
         }
-
-        // Outer border + header separator.
-        let border = Stroke::new(1.0, ctx.theme.c.table_border);
         let right = origin.x + total_w;
-        let bottom = origin.y + total_h;
+        let accent_line = Rect::from_min_max(
+            pos2(origin.x, origin.y + row_h - 2.0),
+            pos2(right, origin.y + row_h),
+        );
         ui.painter()
-            .line_segment([pos2(origin.x, origin.y), pos2(right, origin.y)], border);
-        ui.painter()
-            .line_segment([pos2(origin.x, bottom), pos2(right, bottom)], border);
-        ui.painter()
-            .line_segment([pos2(origin.x, origin.y), pos2(origin.x, bottom)], border);
-        ui.painter()
-            .line_segment([pos2(right, origin.y), pos2(right, bottom)], border);
+            .rect_filled(accent_line, 0.0, ctx.theme.c.link.gamma_multiply(0.05));
         ui.painter().line_segment(
             [
                 pos2(origin.x, origin.y + row_h),
                 pos2(right, origin.y + row_h),
             ],
-            border,
+            Stroke::new(1.0, ctx.theme.c.table_border),
         );
         let _ = table_rect;
     };
-
-    if needs_scroll {
-        egui::ScrollArea::horizontal().show(ui, paint);
-    } else {
-        paint(ui);
-    }
+    outer.show(ui, |ui| {
+        if needs_scroll {
+            egui::ScrollArea::horizontal().show(ui, paint);
+        } else {
+            paint(ui);
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -816,13 +967,15 @@ fn paint_table_row(
     is_header: bool,
     striped: bool,
 ) {
-    let font = FontId::proportional(ctx.font_size);
+    let header_font = FontId::proportional(12.0);
+    let body_font = FontId::proportional(ctx.font_size);
+    let is_hdr = is_header;
     for (i, xo) in x_offsets.iter().enumerate() {
         let rect = Rect::from_min_size(pos2(origin_x + xo, top_y), vec2(cell_w[i], row_h));
-        let bg = if is_header {
+        let bg = if is_hdr {
             ctx.theme.c.table_header_bg
         } else if striped {
-            ctx.theme.c.stripe_bg
+            ctx.theme.c.surface_hover.gamma_multiply(0.4)
         } else {
             Color32::TRANSPARENT
         };
@@ -834,22 +987,29 @@ fn paint_table_row(
             continue;
         }
         let a = align.get(i).copied().unwrap_or(Align::None);
+        let font = if is_hdr { &header_font } else { &body_font };
         let text_w = ui.fonts_mut(|f| {
             let g = f.layout_no_wrap(text.clone(), font.clone(), ctx.theme.c.foreground);
             g.size().x
         });
-        let text_h = ctx.font_size;
+        let text_h = font.size;
         let y = top_y + (row_h - text_h) / 2.0 - 1.0;
         let x = match a {
             Align::Right => xo + cell_w[i] - 7.0 - text_w,
             Align::Center => xo + (cell_w[i] - text_w) / 2.0,
             _ => xo + 7.0,
         };
-        let color = if is_header {
+        let color = if is_hdr {
             ctx.theme.c.heading
         } else {
             ctx.theme.c.foreground
         };
+        let rich = if is_hdr {
+            RichText::new(&text).size(12.0).strong().color(color)
+        } else {
+            RichText::new(&text).size(ctx.font_size).color(color)
+        };
+        let _ = rich;
         ui.painter().text(
             pos2(origin_x + x, y),
             egui::Align2::LEFT_TOP,
@@ -871,28 +1031,40 @@ fn render_image(ui: &mut Ui, src: &str, alt: &str, width: Option<f32>, ctx: &mut
         Some((tex, natural)) => {
             let ratio = (natural.y / natural.x.max(1.0)).clamp(0.1, 2.0);
             let w = match width {
-                // HTML `width` attribute wins, capped at the content column.
                 Some(w) => w.min(max_w).max(1.0),
                 None => natural.x.min(max_w),
             };
             let h = (w * ratio).max(1.0);
             let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-            // Paint a placeholder/background so broken textures show clearly.
-            ui.painter().rect_filled(rect, 2.0, ctx.theme.c.image_bg);
+            let shadow_rect = rect.expand(1.0);
+            ui.painter().rect_filled(
+                shadow_rect,
+                ctx.metrics.radius_md,
+                Color32::from_black_alpha(10),
+            );
+            ui.painter()
+                .rect_filled(rect, ctx.metrics.radius_md, ctx.theme.c.image_bg);
             ui.painter().image(
                 tex.id(),
                 rect,
                 egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+            ui.painter().rect_stroke(
+                rect,
+                ctx.metrics.radius_md,
+                Stroke::new(1.0, ctx.theme.c.table_border.gamma_multiply(0.2)),
+                egui::StrokeKind::Inside,
+            );
             if !alt.is_empty() {
+                ui.add_space(6.0);
                 ui.allocate_ui_with_layout(
                     vec2(w, 14.0),
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
                         ui.label(
                             RichText::new(alt)
-                                .small()
+                                .size(11.0)
                                 .italics()
                                 .color(ctx.theme.c.muted),
                         );
@@ -910,10 +1082,13 @@ fn render_image(ui: &mut Ui, src: &str, alt: &str, width: Option<f32>, ctx: &mut
             egui::Frame::new()
                 .fill(ctx.theme.c.image_bg)
                 .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
-                .corner_radius(ctx.metrics.radius_sm)
-                .inner_margin(egui::Margin::symmetric(10, 8))
+                .corner_radius(ctx.metrics.radius_md)
+                .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(format!("🖼 {state}")).color(fg));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🖼").size(16.0).color(ctx.theme.c.muted));
+                        ui.label(RichText::new(state).color(fg));
+                    });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(if is_remote {
@@ -997,10 +1172,19 @@ fn row_glyph_x(placed: &egui::epaint::text::PlacedRow, idx: usize, galley_x: f32
 }
 
 fn open_url(url: &str) {
+    let lower = url.trim_start().to_ascii_lowercase();
+    let allowed = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !allowed {
+        return;
+    }
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let _ = std::process::Command::new("open").args(["--", url]).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = std::process::Command::new("xdg-open")
+        .args(["--", url])
+        .spawn();
     #[cfg(windows)]
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "", url])
