@@ -6,10 +6,7 @@
 
 ## Local Skills
 
-- `skills/changelog-release-notes/SKILL.md` — use before editing
-  `CHANGELOG.md`, release notes, or PR descriptions that summarize
-  release-visible work. Always check the latest shipped beta and add PR +
-  GitHub author credit for every PR-derived changelog item.
+- `skills/changelog-release-notes/SKILL.md` — MUST use before submitting any PR that includes user-visible changes. Follow it to update `CHANGELOG.md`, release notes, or PR descriptions. Always verify the latest shipped version (`git fetch --tags` + `git tag --sort=-v:refname | head`) and add `_(PR [#...] by [@...])_` credit for every PR-derived changelog item.
 
 ## Build, Test, and Development Commands
 
@@ -45,7 +42,7 @@ Unit tests live beside the implementation in `#[cfg(test)] mod tests` (for examp
 
 ## Commit & Pull Request Guidelines
 
-History currently contains only an initial descriptive commit, so no strict convention is established. Use concise, imperative subjects such as `Fix relative image resolution`, and keep each commit scoped to one concern. All git commit messages and pull request titles/descriptions must be written in English. Pull requests should explain the user-visible change, list validation performed, link relevant issues, and include screenshots for rendering, theme, or editor UI changes. Call out feature-flag, platform, binary-size, or startup-time effects explicitly.
+History currently contains only an initial descriptive commit, so no strict convention is established. Use concise, imperative subjects such as `Fix relative image resolution`, and keep each commit scoped to one concern. All git commit messages and pull request titles/descriptions must be written in English. Before opening a PR, (1) if it includes user-visible changes, update `CHANGELOG.md` per `skills/changelog-release-notes/SKILL.md`: verify the latest shipped version (`git fetch --tags` + `git tag --sort=-v:refname | head` — e.g. `v0.0.1` → next is `v0.0.2 (unreleased)`, `v0.1.0-beta.63` → next is `v0.1.0-beta.64`), add entries under the next unreleased heading grouped as `Added`/`Changed`/`Fixed` and end every PR-derived bullet with `_(PR [#...] by [@...])_`; (2) assess postmortem per `## Postmortems` and state the result in the PR description (`postmortem/YYYY-MM-DD-title.md` linked or `No postmortem required: [reason]`). Pull requests should explain the user-visible change, list validation performed, link relevant issues, and include screenshots for rendering, theme, or editor UI changes. Call out feature-flag, platform, binary-size, or startup-time effects explicitly.
 
 ## Branching
 
@@ -55,8 +52,11 @@ History currently contains only an initial descriptive commit, so no strict conv
 
 ## Postmortems
 
-When solving a non-trivial bug or issue, create `postmortem/YYYY-MM-DD-title.md` with:
+For every PR that fixes a bug, regression, or production issue, assess whether a postmortem is required — this check is mandatory on every PR. MUST create `postmortem/YYYY-MM-DD-title.md` when any of these holds: regression from a prior shipped beta, crash / data-loss / security issue, user-visible breakage, or investigation/debugging > ~4 hours. Template:
+
 - What happened
 - Root cause
 - Fix applied
-- What we learned
+- What we learned (prevention, test, or process change)
+
+Link the postmortem file in the PR description. If no postmortem is needed, explicitly state `No postmortem required: [reason, e.g., trivial typo / single-line fix without regression]` in the PR description so the check is auditable.

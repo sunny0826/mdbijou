@@ -2169,62 +2169,20 @@ impl MdbijouApp {
                 let inner = ui.available_rect_before_wrap();
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let file_name = self
-                            .doc
-                            .path
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "未命名".to_string());
-                        let folder_rect = egui::Rect::from_center_size(
-                            egui::pos2(ui.cursor().min.x + 8.0, bar.center().y),
-                            egui::vec2(24.0, 24.0),
-                        );
-                        let folder_resp = ui.interact(
-                            folder_rect,
-                            ui.id().with("status_folder"),
-                            egui::Sense::click(),
-                        );
-                        let folder_color = if folder_resp.hovered() { fg } else { muted };
-                        paint_optical_centered_text(
-                            ui.painter(),
-                            folder_rect,
-                            regular::FOLDER_NOTCH,
-                            egui::FontId::proportional(12.0),
-                            folder_color,
-                        );
-                        if folder_resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if folder_resp.clicked() {
-                            if let Some(p) = self.doc.path.clone() {
-                                reveal_in_finder(&p);
-                            }
-                        }
-                        optical_tooltip(&folder_resp, "在 Finder 中显示");
-                        ui.add_space(18.0);
-                        ink_centered_label(
-                            ui,
-                            &file_name,
-                            egui::FontId::proportional(10.0),
-                            muted,
-                            26.0,
-                        );
-                        ui.add_space(10.0);
                         let words = self.doc.text.split_whitespace().count();
                         let chars = self.doc.text.chars().count();
                         let stats_icon_rect = egui::Rect::from_center_size(
-                            egui::pos2(ui.cursor().min.x + 6.0, bar.center().y),
-                            egui::vec2(14.0, 14.0),
+                            egui::pos2(ui.cursor().min.x + 8.0, bar.center().y),
+                            egui::vec2(16.0, 16.0),
                         );
                         paint_optical_centered_text(
                             ui.painter(),
                             stats_icon_rect,
                             regular::TEXT_T,
-                            egui::FontId::proportional(10.0),
+                            egui::FontId::proportional(11.0),
                             muted,
                         );
-                        ui.add_space(10.0);
+                        ui.add_space(12.0);
                         ink_centered_label(
                             ui,
                             &format!("{words} 词 · {chars} 字符"),
@@ -2567,6 +2525,7 @@ fn base_dir_for(doc: &Document) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn reveal_in_finder(path: &std::path::Path) {
     let _ = std::process::Command::new("open")
         .args(["-R", "--"])
@@ -2575,6 +2534,7 @@ fn reveal_in_finder(path: &std::path::Path) {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn reveal_in_finder(_path: &std::path::Path) {}
 
 #[cfg(test)]
