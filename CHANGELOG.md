@@ -9,6 +9,7 @@
 ### Fixed
 
 - Status bar: remove duplicate filename (already shown in title bar) and fix word-count `T` icon rendering smaller than adjacent text _(PR [#12](https://github.com/sunny0826/mdbijou/pull/12) by [@sunny0826](https://github.com/sunny0826))_
+- Preview: fix table horizontal scrollbar not reaching the last column and trailing blank when scrolled to end _(PR [#13](https://github.com/sunny0826/mdbijou/pull/13) by [@sunny0826](https://github.com/sunny0826))_
 
 ## v0.0.1
 

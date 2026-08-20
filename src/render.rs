@@ -959,9 +959,9 @@ fn render_table(
         .stroke(Stroke::new(1.0, ctx.theme.c.table_border))
         .shadow(ctx.metrics.shadow_sm)
         .inner_margin(egui::Margin::same(0));
-    let paint = |ui: &mut Ui| {
+    let paint_content = |ui: &mut Ui, alloc_w: f32| {
         let origin = ui.cursor().min;
-        let (table_rect, _) = ui.allocate_exact_size(vec2(total_w, total_h), Sense::hover());
+        let (table_rect, _) = ui.allocate_exact_size(vec2(alloc_w, total_h), Sense::hover());
         let mut x_offsets: Vec<f32> = Vec::with_capacity(ncols);
         let mut x = 0.0;
         for w in &cell_w {
@@ -1005,13 +1005,20 @@ fn render_table(
         );
         let _ = table_rect;
     };
-    outer.show(ui, |ui| {
-        if needs_scroll {
-            egui::ScrollArea::horizontal().show(ui, paint);
-        } else {
-            paint(ui);
-        }
-    });
+    if needs_scroll {
+        // Keep viewport at `avail` so `max = total_w - viewport` is exact; otherwise
+        // the default auto_shrink makes the thumb stop short and the last column
+        // stays clipped.
+        outer.show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt(format!("table-{}-{}", header.len(), rows.len()))
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| paint_content(ui, total_w));
+        });
+    } else {
+        outer.show(ui, |ui| paint_content(ui, total_w));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
