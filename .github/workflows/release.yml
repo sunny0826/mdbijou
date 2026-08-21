@@ -14,10 +14,24 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync Cargo version with tag
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "Tag version: $TAG_VERSION"
+          echo "Cargo version: $CARGO_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "Syncing Cargo.toml $CARGO_VERSION -> $TAG_VERSION"
+            # macOS sed requires '' after -i
+            sed -i '' "s/^version *= *\".*\"/version = \"$TAG_VERSION\"/" Cargo.toml
+            grep '^version' Cargo.toml | head -n1
+          fi
 
       - name: Build release binary
         run: cargo build --release
@@ -25,7 +39,20 @@ jobs:
       - name: Package .dmg
         run: ./scripts/bundle.sh --dmg --skip-build
 
+      - name: Verify .dmg artifact
+        shell: bash
+        run: |
+          echo "Listing dist/"
+          ls -lh dist/
+          DMG_COUNT=$(ls -1 dist/*.dmg 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$DMG_COUNT" -eq 0 ]; then
+            echo "::error::No .dmg found in dist/"
+            exit 1
+          fi
+          echo "Found $DMG_COUNT dmg(s)"
+
       - name: Extract release notes from CHANGELOG
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v v="$VERSION" '
@@ -36,13 +63,32 @@ jobs:
           if [ ! -s /tmp/release-notes.md ]; then
             echo "Release of mdbijou $VERSION." > /tmp/release-notes.md
           fi
+          echo "--- release notes ---"
+          cat /tmp/release-notes.md
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/mdbijou-${VERSION}.dmg" \
-            --title "mdbijou $VERSION" \
-            --notes-file /tmp/release-notes.md
+          # Resolve the actual dmg file (robust to version mismatch)
+          DMG_FILE=$(ls -t dist/*.dmg 2>/dev/null | head -n1 || true)
+          if [ -z "$DMG_FILE" ]; then
+            echo "::error::No dmg file found in dist/"
+            exit 1
+          fi
+          echo "Publishing $GITHUB_REF_NAME with asset: $DMG_FILE"
+          ls -lh "$DMG_FILE"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — uploading asset with --clobber"
+            gh release upload "$GITHUB_REF_NAME" "$DMG_FILE" --clobber
+            # Update notes/title if needed
+            gh release edit "$GITHUB_REF_NAME" --title "mdbijou $VERSION" --notes-file /tmp/release-notes.md || true
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "$DMG_FILE" \
+              --title "mdbijou $VERSION" \
+              --notes-file /tmp/release-notes.md
+          fi

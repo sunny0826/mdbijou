@@ -1,6 +1,6 @@
 [package]
 name = "mdbijou"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Lightweight native Markdown reader + simple editor with syntax highlighting"
 license = "MIT"
