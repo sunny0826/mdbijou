@@ -50,6 +50,16 @@ fn walk(blocks: &[Block], out: &mut Vec<TocEntry>, used: &mut HashMap<String, us
                     walk(item, out, used);
                 }
             }
+            Block::CardGroup { cards, .. } => {
+                for card in cards {
+                    walk(&card.blocks, out, used);
+                }
+            }
+            Block::Steps { items } => {
+                for step in items {
+                    walk(&step.blocks, out, used);
+                }
+            }
             Block::Footnote { blocks, .. } => walk(blocks, out, used),
             // HTML fragments are converted to IR the same way the preview
             // renders them, so traversal order stays identical.

@@ -1,7 +1,7 @@
-//! mdbijou — lightweight native Markdown reader + simple editor.
+//! mdbijou — lightweight native Markdown and MDX reader + simple editor.
 //!
 //! Usage:
-//!   mdbijou [options] [file.md]
+//!   mdbijou [options] [file.md|file.mdx]
 //! Options:
 //!   --edit                 open directly in the editor view
 //!   --theme <id>           start with a specific theme (github-light|github-dark|sepia)
@@ -13,6 +13,7 @@ mod app;
 mod config;
 mod document;
 mod editor;
+mod file_types;
 mod fonts;
 mod highlight;
 mod html;
@@ -34,10 +35,10 @@ fn print_help() {
         .collect();
     let theme_list = themes.join("|");
     println!(
-        "mdbijou {} — lightweight Markdown reader + simple editor\n\
+        "mdbijou {} — lightweight Markdown and MDX reader + simple editor\n\
          \n\
          USAGE:\n\
-         \x20 mdbijou [OPTIONS] [FILE]\n\
+         \x20 mdbijou [OPTIONS] [FILE.md|FILE.mdx]\n\
          \n\
          OPTIONS:\n\
          \x20 --edit            open directly in the editor view\n\

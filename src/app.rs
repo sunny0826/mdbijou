@@ -6,6 +6,7 @@
 use crate::config::{self, Config, View};
 use crate::document::Document;
 use crate::editor::Editor;
+use crate::file_types::{DEFAULT_DOCUMENT_NAME, DOCUMENT_EXTENSIONS, DOCUMENT_FILTER_NAME};
 use crate::highlight::{self, Highlighter};
 use crate::images::ImageStore;
 use crate::install;
@@ -201,8 +202,8 @@ impl MdbijouApp {
 
     fn save_as(&mut self) -> bool {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown", "txt"])
-            .set_file_name("untitled.md")
+            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS)
+            .set_file_name(DEFAULT_DOCUMENT_NAME)
             .save_file()
         {
             let ok = config::atomic_write(&path, self.doc.text.as_bytes()).is_ok();
@@ -227,7 +228,7 @@ impl MdbijouApp {
 
     fn open_via_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown", "txt"])
+            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS)
             .set_directory(std::env::current_dir().unwrap_or_default())
             .pick_file()
         {

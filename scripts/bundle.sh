@@ -71,13 +71,14 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>Markdown Document</string>
+            <string>Markdown / MDX Document</string>
             <key>CFBundleTypeRole</key>
-            <string>Viewer</string>
+            <string>Editor</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>net.daringfireball.markdown</string>
                 <string>public.markdown</string>
+                <string>com.mdbijou.mdx</string>
             </array>
             <key>LSHandlerRank</key>
             <string>Alternate</string>
@@ -101,6 +102,25 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
                     <string>md</string>
                     <string>markdown</string>
                 </array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.mdbijou.mdx</string>
+            <key>UTTypeDescription</key>
+            <string>MDX Document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>mdx</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>text/mdx</string>
             </dict>
         </dict>
     </array>

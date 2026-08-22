@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">MDbijou</h1>
-<p align="center"><strong>A simple Markdown reader and editor.</strong></p>
+<p align="center"><strong>A simple Markdown and MDX reader and editor.</strong></p>
 
 ![mdbijou screenshot](assets/screenshot.png)
 

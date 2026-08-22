@@ -10,6 +10,20 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Card {
+    pub title: String,
+    pub icon: Option<String>,
+    pub href: Option<String>,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Step {
+    pub title: String,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 // Names intentionally mirror pulldown-cmark's `CodeBlock`/`BlockQuote` tags.
 #[allow(clippy::enum_variant_names)]
 pub enum Block {
@@ -44,6 +58,15 @@ pub enum Block {
         header: Vec<Vec<Inline>>,
         align: Vec<Align>,
         rows: Vec<Vec<Vec<Inline>>>,
+    },
+    /// MDX documentation cards rendered as a responsive native grid.
+    CardGroup {
+        columns: usize,
+        cards: Vec<Card>,
+    },
+    /// MDX documentation steps rendered as an ordered vertical sequence.
+    Steps {
+        items: Vec<Step>,
     },
     ThematicBreak,
     /// Block-level HTML, kept verbatim but never executed (UI-MD-011).
@@ -133,6 +156,7 @@ fn mk_options() -> Options {
     o.insert(Options::ENABLE_TASKLISTS);
     o.insert(Options::ENABLE_STRIKETHROUGH);
     o.insert(Options::ENABLE_FOOTNOTES);
+    o.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     o
 }
 
@@ -179,6 +203,9 @@ enum Ctx {
     HtmlBlock {
         buf: String,
     },
+    Metadata {
+        buf: String,
+    },
     Footnote {
         label: String,
         blocks: Vec<Block>,
@@ -199,6 +226,89 @@ enum Ctx {
 }
 
 fn parse(text: &str) -> Vec<Block> {
+    let mut out = Vec::new();
+    let mut markdown_start = 0usize;
+    let mut cursor = 0usize;
+    let mut fence: Option<char> = None;
+
+    while cursor < text.len() {
+        let line_end = text[cursor..]
+            .find('\n')
+            .map_or(text.len(), |offset| cursor + offset + 1);
+        let line = &text[cursor..line_end];
+        let trimmed = line.trim_start();
+
+        if let Some(marker) = fence_marker(trimmed) {
+            match fence {
+                Some(open) if open == marker => fence = None,
+                None => fence = Some(marker),
+                _ => {}
+            }
+            cursor = line_end;
+            continue;
+        }
+
+        let indentation = line.len().saturating_sub(trimmed.len());
+        if fence.is_none() && indentation <= 3 {
+            if let Some(closing) = mdx_component_closing_tag(trimmed) {
+                if let Some(relative_end) = text[cursor..].find(closing) {
+                    let component_end = cursor + relative_end + closing.len();
+                    out.extend(parse_markdown(&text[markdown_start..cursor]));
+                    let raw = &text[cursor..component_end];
+                    match crate::html::html_blocks(raw) {
+                        Some(blocks) => out.extend(blocks),
+                        None => out.extend(parse_markdown(raw)),
+                    }
+                    cursor = component_end;
+                    markdown_start = component_end;
+                    continue;
+                }
+            }
+        }
+
+        cursor = line_end;
+    }
+
+    out.extend(parse_markdown(&text[markdown_start..]));
+    out
+}
+
+/// Parse Markdown nested inside a safe HTML/MDX container.
+pub(crate) fn parse_fragment(text: &str) -> Vec<Block> {
+    parse(text)
+}
+
+fn fence_marker(line: &str) -> Option<char> {
+    let marker = line.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    (line
+        .chars()
+        .take_while(|character| *character == marker)
+        .count()
+        >= 3)
+        .then_some(marker)
+}
+
+fn mdx_component_closing_tag(line: &str) -> Option<&'static str> {
+    const COMPONENTS: [(&str, &str); 4] = [
+        ("CardGroup", "</CardGroup>"),
+        ("Steps", "</Steps>"),
+        ("Card", "</Card>"),
+        ("Step", "</Step>"),
+    ];
+
+    COMPONENTS.iter().find_map(|(name, closing)| {
+        let rest = line.strip_prefix('<')?.strip_prefix(name)?;
+        rest.chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace() || character == '>')
+            .then_some(*closing)
+    })
+}
+
+fn parse_markdown(text: &str) -> Vec<Block> {
     let parser = Parser::new_ext(text, mk_options());
     let mut stack: Vec<Ctx> = vec![Ctx::Root];
     let mut out: Vec<Block> = Vec::new();
@@ -212,6 +322,7 @@ fn parse(text: &str) -> Vec<Block> {
                 // other text becomes an inline node.
                 match stack.last_mut() {
                     Some(Ctx::CodeBlock { buf, .. }) => buf.push_str(&t),
+                    Some(Ctx::Metadata { buf }) => buf.push_str(&t),
                     _ => sink_inline(&mut stack, &mut out, Inline::Text(t.to_string())),
                 }
             }
@@ -263,11 +374,7 @@ fn start_tag(stack: &mut Vec<Ctx>, tag: Tag<'_>) {
             let lang = match kind {
                 CodeBlockKind::Fenced(l) => {
                     let s = l.to_string();
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s)
-                    }
+                    s.split_whitespace().next().map(str::to_string)
                 }
                 CodeBlockKind::Indented => None,
             };
@@ -353,6 +460,7 @@ fn start_tag(stack: &mut Vec<Ctx>, tag: Tag<'_>) {
             alt: String::new(),
         }),
         Tag::HtmlBlock => stack.push(Ctx::HtmlBlock { buf: String::new() }),
+        Tag::MetadataBlock(_) => stack.push(Ctx::Metadata { buf: String::new() }),
         // Unsupported span/block tags degrade safely (no stack frame pushed, so
         // the corresponding End is a no-op too — structure is not corrupted).
         _ => {}
@@ -508,6 +616,14 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
             Ctx::HtmlBlock { buf } => Some(Block::Html(buf)),
             _ => None,
         }),
+        TagEnd::MetadataBlock(_) => pop_into(stack, out, |c| match c {
+            Ctx::Metadata { buf } => metadata_title(&buf).map(|title| Block::Heading {
+                level: 1,
+                inlines: vec![Inline::Text(title)],
+                align: Align::None,
+            }),
+            _ => None,
+        }),
         TagEnd::Emphasis => finish_inline(stack, out, |c| match c {
             Ctx::Emphasis(v) => Inline::Emphasis(dedup_text(v)),
             _ => Inline::Text(String::new()),
@@ -538,6 +654,27 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
         // Safe degradation for unsupported tags (already pushed no frame).
         _ => {}
     }
+}
+
+fn metadata_title(metadata: &str) -> Option<String> {
+    metadata.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line
+            .strip_prefix("title:")
+            .or_else(|| line.strip_prefix("title ="))?
+            .trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(value)
+            .trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 /// Pop the top frame and, if it matches `f`, emit the produced block.
@@ -763,6 +900,86 @@ mod tests {
     }
 
     #[test]
+    fn preserves_mdx_source_and_parses_markdown_content() {
+        let source = "import Callout from './Callout'\n\n# MDX guide\n\n<Callout>hello</Callout>\n";
+        let doc = Document::with_path(PathBuf::from("guide.mdx"), source.to_string());
+
+        assert_eq!(doc.path.as_deref(), Some(std::path::Path::new("guide.mdx")));
+        assert_eq!(doc.text, source);
+        assert!(doc.blocks.iter().any(|block| matches!(
+            block,
+            Block::Heading {
+                level: 1,
+                inlines,
+                ..
+            } if inline_plain_all(inlines) == "MDX guide"
+        )));
+    }
+
+    #[test]
+    fn frontmatter_title_becomes_heading_without_rendering_metadata_fields() {
+        let blocks = parse_md(
+            "---\ntitle: \"Nowledge Mem 101\"\ndescription: \"Hidden metadata\"\n---\n\nBody\n",
+        );
+        assert!(matches!(
+            &blocks[0],
+            Block::Heading { level: 1, inlines, .. }
+                if inline_plain_all(inlines) == "Nowledge Mem 101"
+        ));
+        assert!(!para_text(&blocks).join(" ").contains("Hidden metadata"));
+    }
+
+    #[test]
+    fn extracts_mdx_components_with_markdown_children() {
+        let source = r#"<CardGroup cols={2}>
+  <Card title="Essentials" icon="book-open" href="/essentials">
+    Start with **your first memory**.
+  </Card>
+</CardGroup>
+
+<Steps>
+  <Step title="Save a memory">
+    Run this:
+
+    ```text
+    hello
+    ```
+  </Step>
+</Steps>
+"#;
+        let blocks = parse_md(source);
+        let Block::CardGroup { columns, cards } = &blocks[0] else {
+            panic!("expected card group: {blocks:#?}")
+        };
+        assert_eq!(*columns, 2);
+        assert_eq!(cards[0].title, "Essentials");
+        assert_eq!(cards[0].href.as_deref(), Some("/essentials"));
+        assert!(matches!(
+            &cards[0].blocks[0],
+            Block::Paragraph { inlines, .. }
+                if inlines.iter().any(|inline| matches!(inline, Inline::Strong(_)))
+        ));
+
+        let Block::Steps { items } = &blocks[1] else {
+            panic!("expected steps: {blocks:#?}")
+        };
+        assert_eq!(items[0].title, "Save a memory");
+        assert!(items[0]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::CodeBlock { text, .. } if text == "hello")));
+    }
+
+    #[test]
+    fn leaves_component_like_text_inside_fences_as_code() {
+        let blocks = parse_md("```mdx\n<Card title=\"Example\">\ntext\n</Card>\n```\n");
+        assert!(matches!(
+            blocks.as_slice(),
+            [Block::CodeBlock { text, .. }] if text.contains("<Card")
+        ));
+    }
+
+    #[test]
     fn parses_six_heading_levels() {
         let md = "# h1\n## h2\n### h3\n#### h4\n##### h5\n###### h6\n";
         let blocks = parse_md(md);
@@ -944,6 +1161,15 @@ mod tests {
             })
             .collect();
         assert_eq!(langs, vec![Some("rust".into()), None, None]);
+    }
+
+    #[test]
+    fn fenced_language_ignores_mdx_component_properties() {
+        let blocks = parse_md("```mermaid placement=\"bottom-left\"\nflowchart LR\n```\n");
+        assert!(matches!(
+            blocks.as_slice(),
+            [Block::CodeBlock { lang: Some(lang), .. }] if lang == "mermaid"
+        ));
     }
 
     #[test]
