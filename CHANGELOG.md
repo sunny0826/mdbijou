@@ -5,6 +5,7 @@
 ### Added
 
 - MDX: open, preview, edit, and save `.mdx` documents; register them with the macOS app; and render frontmatter titles, responsive `CardGroup`/`Card` grids, `Steps`/`Step` sequences, common semantic HTML, and Mermaid fences with MDX properties without executing JSX or scripts _(PR [#14](https://github.com/sunny0826/mdbijou/pull/14) by [@sunny0826](https://github.com/sunny0826))_
+- CLI: reject nonexistent file paths with an error and nonzero exit status before launching the app _(PR [#15](https://github.com/sunny0826/mdbijou/pull/15) by [@sunny0826](https://github.com/sunny0826))_
 
 ## v0.0.2
 

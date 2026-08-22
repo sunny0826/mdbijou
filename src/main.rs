@@ -77,6 +77,20 @@ fn load_icon() -> Option<egui::IconData> {
     })
 }
 
+fn validate_cli_path(
+    path: Option<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    match path.try_exists() {
+        Ok(true) => Ok(Some(path)),
+        Ok(false) => Err(format!("file not found: {}", path.display())),
+        Err(err) => Err(format!("cannot access '{}': {err}", path.display())),
+    }
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut file: Option<String> = None;
@@ -136,6 +150,13 @@ fn main() -> eframe::Result {
     let path = file
         .filter(|s| !s.trim().is_empty())
         .map(std::path::PathBuf::from);
+    let path = match validate_cli_path(path) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
 
     // Forward macOS "open documents" requests (Finder double-click, `open`,
     // Dock drop) into the app. Must be installed before `run_native`: AppKit
@@ -169,4 +190,30 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_cli_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn rejects_missing_cli_file_before_app_launch() {
+        let path = std::env::temp_dir().join(format!(
+            "mdbijou-missing-cli-file-{}-{}",
+            std::process::id(),
+            env!("CARGO_PKG_VERSION")
+        ));
+
+        let err = validate_cli_path(Some(path.clone())).unwrap_err();
+
+        assert_eq!(err, format!("file not found: {}", path.display()));
+    }
+
+    #[test]
+    fn accepts_existing_cli_file() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+
+        assert_eq!(validate_cli_path(Some(path.clone())), Ok(Some(path)));
+    }
 }
