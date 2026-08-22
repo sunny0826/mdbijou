@@ -8,7 +8,7 @@
 //! On parse failure or empty input both entry points return `None` so the
 //! caller can fall back to the inert text-card rendering.
 
-use crate::document::{Align, Block, Inline};
+use crate::document::{Align, Block, Card, Inline, Step};
 use html5ever::tendril::TendrilSink;
 use html5ever::{local_name, ns, parse_document, parse_fragment, ParseOpts, QualName};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -130,7 +130,10 @@ fn walk_blocks(handle: &Handle, out: &mut Vec<Block>, inherited_align: Align) {
                 let tag = name.local.as_ref();
                 match tag {
                     "p" | "div" | "center" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                    | "blockquote" | "hr" | "img" => {
+                    | "blockquote" | "hr" | "img" | "section" | "article" | "main" | "header"
+                    | "footer" | "aside" | "nav" | "figure" | "figcaption" | "details"
+                    | "summary" | "ul" | "ol" | "pre" | "table" | "cardgroup" | "card"
+                    | "steps" | "step" => {
                         flush_paragraph(&mut pending, out, inherited_align);
                         emit_block_element(child, out);
                     }
@@ -160,16 +163,25 @@ fn walk_blocks(handle: &Handle, out: &mut Vec<Block>, inherited_align: Align) {
     flush_paragraph(&mut pending, out, inherited_align);
 }
 
-/// Emit the IR for a single whitelisted block-level element (`p/div/center`,
-/// `h1-6`, `blockquote`, `hr`, `img`).
+/// Emit the IR for a single whitelisted block-level HTML or MDX element.
 fn emit_block_element(handle: &Handle, out: &mut Vec<Block>) {
     let Some(tag) = tag_of(handle) else {
         return;
     };
     match tag {
-        "p" | "div" | "center" => {
+        "p" | "div" | "center" | "section" | "article" | "main" | "header" | "footer" | "aside"
+        | "nav" | "figure" | "figcaption" | "details" => {
             let my_align = align_attr(handle, tag);
             walk_blocks(handle, out, my_align);
+        }
+        "summary" => {
+            let inlines = collect_inlines(handle);
+            if inlines.iter().any(inline_has_content) {
+                out.push(Block::Paragraph {
+                    inlines: vec![Inline::Strong(inlines)],
+                    align: Align::None,
+                });
+            }
         }
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             let level = tag[1..].parse().unwrap_or(1);
@@ -192,8 +204,189 @@ fn emit_block_element(handle: &Handle, out: &mut Vec<Block>) {
         }
         "hr" => out.push(Block::ThematicBreak),
         "img" => emit_image(handle, out, Align::None),
+        "ul" => emit_list(handle, out, false),
+        "ol" => emit_list(handle, out, true),
+        "pre" => emit_preformatted(handle, out),
+        "table" => emit_table(handle, out),
+        "cardgroup" => emit_card_group(handle, out),
+        "card" => {
+            if let Some(card) = parse_card(handle) {
+                out.push(Block::CardGroup {
+                    columns: 1,
+                    cards: vec![card],
+                });
+            }
+        }
+        "steps" => emit_steps(handle, out),
+        "step" => {
+            if let Some(step) = parse_step(handle) {
+                out.push(Block::Steps { items: vec![step] });
+            }
+        }
         _ => {}
     }
+}
+
+fn emit_list(handle: &Handle, out: &mut Vec<Block>, ordered: bool) {
+    let items: Vec<Vec<Block>> = child_elements(handle, "li")
+        .into_iter()
+        .map(|item| parse_embedded_markdown(&item))
+        .filter(|blocks| !blocks.is_empty())
+        .collect();
+    if !items.is_empty() {
+        let start = if ordered {
+            attr(handle, "start")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        out.push(Block::List {
+            ordered,
+            start,
+            items,
+        });
+    }
+}
+
+fn emit_preformatted(handle: &Handle, out: &mut Vec<Block>) {
+    let text = element_text(handle).trim_matches('\n').to_string();
+    if text.is_empty() {
+        return;
+    }
+    let lang = child_elements(handle, "code")
+        .first()
+        .and_then(|code| attr(code, "class"))
+        .and_then(|class| {
+            class
+                .split_whitespace()
+                .find_map(|name| name.strip_prefix("language-").map(str::to_string))
+        });
+    out.push(Block::CodeBlock { lang, text });
+}
+
+fn emit_table(handle: &Handle, out: &mut Vec<Block>) {
+    let mut row_handles = Vec::new();
+    collect_descendant_elements(handle, "tr", &mut row_handles);
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+
+    for row in row_handles {
+        let children = row.children.borrow();
+        let has_header_cells = children.iter().any(|cell| tag_of(cell) == Some("th"));
+        let cells: Vec<Vec<Inline>> = children
+            .iter()
+            .filter(|cell| matches!(tag_of(cell), Some("th" | "td")))
+            .map(collect_inlines)
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        if header.is_empty() && has_header_cells {
+            header = cells;
+        } else {
+            rows.push(cells);
+        }
+    }
+
+    if header.is_empty() && !rows.is_empty() {
+        header = rows.remove(0);
+    }
+    if !header.is_empty() {
+        let align = vec![Align::None; header.len()];
+        out.push(Block::Table {
+            header,
+            align,
+            rows,
+        });
+    }
+}
+
+fn emit_card_group(handle: &Handle, out: &mut Vec<Block>) {
+    let cards: Vec<Card> = child_elements(handle, "card")
+        .into_iter()
+        .filter_map(|card| parse_card(&card))
+        .collect();
+    if cards.is_empty() {
+        return;
+    }
+    let columns = attr(handle, "cols")
+        .as_deref()
+        .and_then(parse_jsx_usize)
+        .unwrap_or(2)
+        .clamp(1, 4);
+    out.push(Block::CardGroup { columns, cards });
+}
+
+fn parse_card(handle: &Handle) -> Option<Card> {
+    let title = attr(handle, "title")?.trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let icon = attr(handle, "icon").filter(|icon| !icon.trim().is_empty());
+    let href = attr(handle, "href").filter(|href| is_allowed_url(href));
+    Some(Card {
+        title,
+        icon,
+        href,
+        blocks: parse_embedded_markdown(handle),
+    })
+}
+
+fn emit_steps(handle: &Handle, out: &mut Vec<Block>) {
+    let items: Vec<Step> = child_elements(handle, "step")
+        .into_iter()
+        .filter_map(|step| parse_step(&step))
+        .collect();
+    if !items.is_empty() {
+        out.push(Block::Steps { items });
+    }
+}
+
+fn parse_step(handle: &Handle) -> Option<Step> {
+    let title = attr(handle, "title")?.trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    Some(Step {
+        title,
+        blocks: parse_embedded_markdown(handle),
+    })
+}
+
+fn parse_embedded_markdown(handle: &Handle) -> Vec<Block> {
+    let source = dedent(&element_text(handle));
+    crate::document::parse_fragment(&source)
+}
+
+fn child_elements(handle: &Handle, tag: &str) -> Vec<Handle> {
+    handle
+        .children
+        .borrow()
+        .iter()
+        .filter(|child| tag_of(child) == Some(tag))
+        .cloned()
+        .collect()
+}
+
+fn collect_descendant_elements(handle: &Handle, tag: &str, out: &mut Vec<Handle>) {
+    for child in handle.children.borrow().iter() {
+        if tag_of(child) == Some(tag) {
+            out.push(child.clone());
+        } else {
+            collect_descendant_elements(child, tag, out);
+        }
+    }
+}
+
+fn parse_jsx_usize(value: &str) -> Option<usize> {
+    value
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Alignment of a block element: its `align` attribute, with `<center>`
@@ -299,7 +492,7 @@ fn push_inline_node(child: &Handle, out: &mut Vec<Inline>) {
                         out.push(Inline::Emphasis(children));
                     }
                 }
-                "code" => {
+                "code" | "kbd" | "samp" => {
                     let text = collapse_ws(&element_text(child));
                     let text = text.trim().to_string();
                     if !text.is_empty() {
@@ -308,7 +501,15 @@ fn push_inline_node(child: &Handle, out: &mut Vec<Inline>) {
                 }
                 "br" => out.push(Inline::HardBreak),
                 // Transparent containers: pass children through unchanged.
-                "span" | "html" | "body" => walk_inlines(child, out),
+                "span" | "html" | "body" | "small" | "mark" | "u" | "sub" | "sup" | "var" => {
+                    walk_inlines(child, out)
+                }
+                "del" | "s" => {
+                    let children = collect_inlines(child);
+                    if children.iter().any(inline_has_content) {
+                        out.push(Inline::Strikethrough(children));
+                    }
+                }
                 "img" => {
                     let alt = attr(child, "alt").unwrap_or_default();
                     match attr(child, "src").filter(|s| is_allowed_url(s)) {
@@ -360,6 +561,41 @@ fn collect_text(handle: &Handle, out: &mut String) {
             _ => {}
         }
     }
+}
+
+fn dedent(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let last = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(first, |index| index + 1);
+    let lines = &lines[first..last];
+    let indentation = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0);
+
+    lines
+        .iter()
+        .map(|line| {
+            let mut bytes = 0usize;
+            for character in line.chars().take(indentation) {
+                if matches!(character, ' ' | '\t') {
+                    bytes += character.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            &line[bytes..]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +739,18 @@ mod tests {
                     out.push_str(&plain(inlines));
                 }
                 Block::BlockQuote { blocks } => out.push_str(&block_text(blocks)),
+                Block::CardGroup { cards, .. } => {
+                    for card in cards {
+                        out.push_str(&card.title);
+                        out.push_str(&block_text(&card.blocks));
+                    }
+                }
+                Block::Steps { items } => {
+                    for step in items {
+                        out.push_str(&step.title);
+                        out.push_str(&block_text(&step.blocks));
+                    }
+                }
                 _ => {}
             }
         }
@@ -675,6 +923,80 @@ mod tests {
     fn html_entities_are_decoded() {
         let ins = inlines(r#"a &amp; b &lt;c&gt; &nbsp; d"#);
         assert_eq!(plain(&ins), "a & b <c> d");
+    }
+
+    #[test]
+    fn mdx_card_group_preserves_attributes_and_markdown_body() {
+        let bs = blocks(
+            r#"<CardGroup cols={2}>
+  <Card title="Essentials" icon="book-open" href="/essentials">
+    Start with **your first memory**.
+  </Card>
+</CardGroup>"#,
+        );
+        let Block::CardGroup { columns, cards } = &bs[0] else {
+            panic!("expected card group")
+        };
+        assert_eq!(*columns, 2);
+        assert_eq!(cards[0].title, "Essentials");
+        assert_eq!(cards[0].icon.as_deref(), Some("book-open"));
+        assert_eq!(cards[0].href.as_deref(), Some("/essentials"));
+        assert!(matches!(
+            &cards[0].blocks[0],
+            Block::Paragraph { inlines, .. }
+                if inlines.iter().any(|inline| matches!(inline, Inline::Strong(_)))
+        ));
+    }
+
+    #[test]
+    fn mdx_steps_preserve_titles_and_fenced_code() {
+        let bs = blocks(
+            r#"<Steps>
+  <Step title="Ask Mem directly">
+    Ask this:
+
+    ```text
+    What did we decide?
+    ```
+  </Step>
+</Steps>"#,
+        );
+        let Block::Steps { items } = &bs[0] else {
+            panic!("expected steps")
+        };
+        assert_eq!(items[0].title, "Ask Mem directly");
+        assert!(items[0].blocks.iter().any(
+            |block| matches!(block, Block::CodeBlock { text, .. } if text == "What did we decide?")
+        ));
+    }
+
+    #[test]
+    fn semantic_html_lists_and_preformatted_code_convert() {
+        let bs = blocks(
+            r#"<section><ul><li>one</li><li><strong>two</strong></li></ul><pre><code class="language-rust">fn main() {}</code></pre></section>"#,
+        );
+        assert!(matches!(
+            &bs[0],
+            Block::List { ordered: false, items, .. } if items.len() == 2
+        ));
+        assert!(matches!(
+            &bs[1],
+            Block::CodeBlock { lang: Some(lang), text } if lang == "rust" && text == "fn main() {}"
+        ));
+    }
+
+    #[test]
+    fn semantic_html_table_converts_to_native_table() {
+        let bs = blocks(
+            r#"<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>alpha</td><td><strong>one</strong></td></tr></tbody></table>"#,
+        );
+        let Block::Table { header, rows, .. } = &bs[0] else {
+            panic!("expected table")
+        };
+        assert_eq!(plain(&header[0]), "Name");
+        assert_eq!(plain(&header[1]), "Value");
+        assert_eq!(plain(&rows[0][0]), "alpha");
+        assert!(matches!(rows[0][1].as_slice(), [Inline::Strong(_)]));
     }
 
     #[test]

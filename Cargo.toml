@@ -2,7 +2,7 @@
 name = "mdbijou"
 version = "0.0.2"
 edition = "2021"
-description = "Lightweight native Markdown reader + simple editor with syntax highlighting"
+description = "Lightweight native Markdown and MDX reader + simple editor with syntax highlighting"
 license = "MIT"
 
 [[bin]]

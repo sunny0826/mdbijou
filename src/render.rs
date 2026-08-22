@@ -5,12 +5,13 @@
 //! made clickable via character-cursor hit testing. Lists, tables, quotes and
 //! images are handled as dedicated widgets.
 
-use crate::document::{Align, Block, Inline};
+use crate::document::{Align, Block, Card, Inline, Step};
 use crate::highlight::{Highlighter, Line};
 use crate::images::ImageStore;
 use crate::theme::{Metrics, Theme};
 use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{pos2, vec2, Color32, CursorIcon, FontId, Rect, RichText, Sense, Stroke, Ui};
+use egui_phosphor::regular;
 use std::time::{Duration, Instant};
 
 /// Shared state needed across block rendering.
@@ -236,6 +237,12 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             render_table(ui, header, align, rows, ctx);
             ui.add_space(ctx.metrics.space_sm);
         }
+        Block::CardGroup { columns, cards } => {
+            render_card_group(ui, *columns, cards, ctx, depth);
+        }
+        Block::Steps { items } => {
+            render_steps(ui, items, ctx, depth);
+        }
         Block::ThematicBreak => {
             ui.add_space(14.0);
             let hairline_h = ctx.metrics.hairline.max(1.0);
@@ -289,6 +296,173 @@ pub fn render_block(ui: &mut Ui, block: &Block, ctx: &mut RenderCtx, depth: usiz
             });
             ui.add_space(6.0);
         }
+    }
+}
+
+fn render_card_group(
+    ui: &mut Ui,
+    requested_columns: usize,
+    cards: &[Card],
+    ctx: &mut RenderCtx,
+    depth: usize,
+) {
+    if cards.is_empty() {
+        return;
+    }
+    let columns = if ui.available_width() < 520.0 {
+        1
+    } else {
+        requested_columns.clamp(1, 4).min(cards.len())
+    };
+    ui.add_space(ctx.metrics.space_sm);
+    for (row_index, row) in cards.chunks(columns).enumerate() {
+        ui.columns(columns, |column_uis| {
+            for (column_index, card) in row.iter().enumerate() {
+                let ui = &mut column_uis[column_index];
+                let frame = egui::Frame::new()
+                    .fill(ctx.theme.c.surface)
+                    .stroke(Stroke::new(ctx.metrics.hairline, ctx.theme.c.table_border))
+                    .corner_radius(ctx.metrics.radius_lg)
+                    .inner_margin(egui::Margin::symmetric(14, 12));
+                let shown = frame.show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    let icon_width = if card.icon.is_some() { 22.0 } else { 0.0 };
+                    let arrow_width = if card.href.is_some() { 20.0 } else { 0.0 };
+                    let title_width =
+                        (ui.available_width() - icon_width - arrow_width - 8.0).max(72.0);
+                    ui.horizontal_top(|ui| {
+                        if let Some(icon) = card.icon.as_deref() {
+                            ui.label(
+                                RichText::new(card_icon(icon))
+                                    .size(ctx.font_size + 1.0)
+                                    .color(ctx.theme.c.link),
+                            );
+                        }
+                        ui.allocate_ui_with_layout(
+                            vec2(title_width, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_max_width(title_width);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&card.title)
+                                            .size(ctx.font_size)
+                                            .strong()
+                                            .color(ctx.theme.c.heading),
+                                    )
+                                    .wrap(),
+                                );
+                            },
+                        );
+                        if card.href.is_some() {
+                            ui.label(
+                                RichText::new(regular::ARROW_RIGHT)
+                                    .size(ctx.font_size - 1.0)
+                                    .color(ctx.theme.c.muted),
+                            );
+                        }
+                    });
+                    if !card.blocks.is_empty() {
+                        ui.add_space(2.0);
+                        render_blocks(ui, &card.blocks, ctx, depth + 1);
+                    }
+                });
+
+                let response = if card.href.is_some() {
+                    ui.interact(
+                        shown.response.rect,
+                        ui.id()
+                            .with(("mdx-card", row_index, column_index, &card.title)),
+                        Sense::click(),
+                    )
+                } else {
+                    shown.response
+                };
+                if response.hovered() && card.href.is_some() {
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        ctx.metrics.radius_lg,
+                        Stroke::new(1.2, ctx.theme.c.link.gamma_multiply(0.75)),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                if response.clicked() {
+                    if let Some(href) = card.href.as_deref() {
+                        open_url(href);
+                    }
+                }
+            }
+        });
+        if row_index + 1 < cards.len().div_ceil(columns) {
+            ui.add_space(ctx.metrics.space_sm);
+        }
+    }
+    ui.add_space(ctx.metrics.space_sm);
+}
+
+fn render_steps(ui: &mut Ui, items: &[Step], ctx: &mut RenderCtx, depth: usize) {
+    if items.is_empty() {
+        return;
+    }
+    ui.add_space(ctx.metrics.space_sm);
+    for (index, step) in items.iter().enumerate() {
+        let mut marker_rect = Rect::NOTHING;
+        let row = ui.horizontal_top(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(34.0, 30.0), Sense::hover());
+            marker_rect = rect;
+            let circle = Rect::from_center_size(rect.center(), vec2(26.0, 26.0));
+            ui.painter()
+                .circle_filled(circle.center(), 13.0, ctx.theme.c.surface);
+            ui.painter().circle_stroke(
+                circle.center(),
+                13.0,
+                Stroke::new(1.2, ctx.theme.c.link.gamma_multiply(0.7)),
+            );
+            crate::app::paint_optical_centered_text(
+                ui.painter(),
+                circle,
+                &(index + 1).to_string(),
+                FontId::proportional(12.0),
+                ctx.theme.c.link,
+            );
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(&step.title)
+                        .size(ctx.font_size + 1.0)
+                        .strong()
+                        .color(ctx.theme.c.heading),
+                );
+                if !step.blocks.is_empty() {
+                    render_blocks(ui, &step.blocks, ctx, depth + 1);
+                }
+            });
+        });
+        if index + 1 < items.len() {
+            let line_x = marker_rect.center().x;
+            let line_top = marker_rect.center().y + 13.0;
+            let line_bottom = row.response.rect.bottom() + ctx.metrics.space_sm;
+            ui.painter().line_segment(
+                [pos2(line_x, line_top), pos2(line_x, line_bottom)],
+                Stroke::new(ctx.metrics.hairline, ctx.theme.c.table_border),
+            );
+            ui.add_space(ctx.metrics.space_sm);
+        }
+    }
+    ui.add_space(ctx.metrics.space_sm);
+}
+
+fn card_icon(name: &str) -> &'static str {
+    match name {
+        "book-open" => regular::BOOK_OPEN,
+        "workflow" => regular::FLOW_ARROW,
+        "sparkles" => regular::SPARKLE,
+        "library" => regular::BOOKS,
+        "graduation-cap" => regular::GRADUATION_CAP,
+        "book" => regular::BOOK,
+        "terminal" => regular::TERMINAL,
+        "message-square" => regular::CHAT_TEXT,
+        _ => regular::FILE_TEXT,
     }
 }
 
