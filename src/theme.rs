@@ -1,67 +1,7 @@
 //! Theme system: color model, builtin themes, syntax-highlight palette, and
 //! shared spacing/rounding design tokens.
 
-use egui::Color32;
-
-/// Shared spacing/rounding design tokens (replacing scattered magic numbers).
-#[derive(Debug, Clone, Copy)]
-pub struct Metrics {
-    pub radius_sm: f32, // 4  small buttons, capsules, code blocks
-    pub radius_md: f32, // 8  cards, inputs, inner segmented slots
-    pub radius_lg: f32, // 12 settings card, dialogs, outer segmented control
-    pub radius_xl: f32, // 16 window-level, large cards
-    #[allow(dead_code)] // spacing tokens consumed incrementally (P1)
-    pub space_xs: f32, // 4
-    #[allow(dead_code)]
-    pub space_sm: f32, // 8
-    #[allow(dead_code)]
-    pub space_md: f32, // 12
-    #[allow(dead_code)]
-    pub space_lg: f32, // 20
-    pub hairline: f32,  // 1 physical px
-    pub shadow_sm: egui::epaint::Shadow,
-    pub shadow_md: egui::epaint::Shadow,
-    pub content_max: f32, // 720 reading column max width
-}
-
-impl Default for Metrics {
-    fn default() -> Self {
-        Self {
-            radius_sm: 4.0,
-            radius_md: 8.0,
-            radius_lg: 12.0,
-            radius_xl: 16.0,
-            space_xs: 4.0,
-            space_sm: 8.0,
-            space_md: 12.0,
-            space_lg: 20.0,
-            hairline: 1.0,
-            shadow_sm: egui::epaint::Shadow {
-                offset: [0, 1],
-                blur: 4,
-                spread: 0,
-                color: Color32::from_black_alpha(24),
-            },
-            shadow_md: egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: Color32::from_black_alpha(60),
-            },
-            content_max: 720.0,
-        }
-    }
-}
-
-impl Metrics {
-    /// Metrics with `hairline` = 1 physical px at `scale_factor`.
-    pub fn scaled(scale_factor: f32) -> Self {
-        Self {
-            hairline: 1.0 / scale_factor.max(1.0),
-            ..Self::default()
-        }
-    }
-}
+use crate::color::Color;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -81,57 +21,57 @@ pub enum ThemeKind {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // full theme palette is part of the design API; some fields render-ready only
 pub struct Colors {
-    pub background: Color32,
-    pub foreground: Color32,
-    pub heading: Color32,
-    pub muted: Color32,
-    pub code_fg: Color32,
-    pub code_bg: Color32,
-    pub blockquote_fg: Color32,
-    pub blockquote_bar: Color32,
-    pub quote_bg: Color32,
-    pub link: Color32,
-    pub table_border: Color32,
-    pub table_header_bg: Color32,
-    pub stripe_bg: Color32,
-    pub hr: Color32,
-    pub selection_bg: Color32,
-    pub image_bg: Color32,
+    pub background: Color,
+    pub foreground: Color,
+    pub heading: Color,
+    pub muted: Color,
+    pub code_fg: Color,
+    pub code_bg: Color,
+    pub blockquote_fg: Color,
+    pub blockquote_bar: Color,
+    pub quote_bg: Color,
+    pub link: Color,
+    pub table_border: Color,
+    pub table_header_bg: Color,
+    pub stripe_bg: Color,
+    pub hr: Color,
+    pub selection_bg: Color,
+    pub image_bg: Color,
     /// Elevated surface (slightly lighter/darker than background): status bar,
     /// sidebars, floating toolbars.
-    pub surface: Color32,
+    pub surface: Color,
     /// Hovered surface variant (one step above `surface`).
-    pub surface_hover: Color32,
+    pub surface_hover: Color,
     /// Keyboard focus ring / accent ring.
-    pub focus: Color32,
+    pub focus: Color,
     /// Positive feedback (save success etc.).
-    pub success: Color32,
+    pub success: Color,
     /// Negative feedback (save failure etc.).
-    pub error: Color32,
+    pub error: Color,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // syntax palette consumed by the highlighter map; lite mode uses subset
 pub struct SyntaxColors {
-    pub comment: Color32,
-    pub keyword: Color32,
-    pub string: Color32,
-    pub number: Color32,
-    pub function: Color32,
-    pub typ: Color32,
-    pub variable: Color32,
-    pub operator: Color32,
-    pub punctuation: Color32,
-    pub constant: Color32,
-    pub markup_heading: Color32,
-    pub markup_link: Color32,
-    pub markup_code: Color32,
+    pub comment: Color,
+    pub keyword: Color,
+    pub string: Color,
+    pub number: Color,
+    pub function: Color,
+    pub typ: Color,
+    pub variable: Color,
+    pub operator: Color,
+    pub punctuation: Color,
+    pub constant: Color,
+    pub markup_heading: Color,
+    pub markup_link: Color,
+    pub markup_code: Color,
 }
 
-fn hex(s: &str) -> Color32 {
+fn hex(s: &str) -> Color {
     let s = s.trim_start_matches('#');
     let v = u32::from_str_radix(s, 16).unwrap_or(0);
-    Color32::from_rgb(
+    Color::from_rgb(
         ((v >> 16) & 0xff) as u8,
         ((v >> 8) & 0xff) as u8,
         (v & 0xff) as u8,
@@ -184,8 +124,8 @@ fn github_light() -> Theme {
         surface: hex("#f6f8fa"),
         surface_hover: hex("#eff2f5"),
         focus: hex("#0969da"),
-        success: Color32::from_rgb(70, 170, 90),
-        error: Color32::from_rgb(220, 90, 70),
+        success: Color::from_rgb(70, 170, 90),
+        error: Color::from_rgb(220, 90, 70),
     };
     let syntax = SyntaxColors {
         comment: hex("#6e7781"),
@@ -232,8 +172,8 @@ fn github_dark() -> Theme {
         surface: hex("#161b22"),
         surface_hover: hex("#1e242d"),
         focus: hex("#58a6ff"),
-        success: Color32::from_rgb(63, 185, 80),
-        error: Color32::from_rgb(248, 81, 73),
+        success: Color::from_rgb(63, 185, 80),
+        error: Color::from_rgb(248, 81, 73),
     };
     let syntax = SyntaxColors {
         comment: hex("#8b949e"),
@@ -280,8 +220,8 @@ fn sepia() -> Theme {
         surface: hex("#efe4c8"),
         surface_hover: hex("#e8ddbc"),
         focus: hex("#8b5a00"),
-        success: Color32::from_rgb(70, 170, 90),
-        error: Color32::from_rgb(220, 90, 70),
+        success: Color::from_rgb(70, 170, 90),
+        error: Color::from_rgb(220, 90, 70),
     };
     let syntax = SyntaxColors {
         comment: hex("#9a8b7a"),

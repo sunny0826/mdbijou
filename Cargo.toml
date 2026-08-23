@@ -1,68 +1,48 @@
 [package]
 name = "mdbijou"
-version = "0.0.2"
+version = "0.0.4"
 edition = "2021"
 description = "Lightweight native Markdown and MDX reader + simple editor with syntax highlighting"
 license = "MIT"
+default-run = "mdbijou"
 
 [[bin]]
 name = "mdbijou"
 path = "src/main.rs"
 
+[[bin]]
+name = "mdbijou-gpui"
+path = "src/bin/mdbijou_gpui.rs"
+
+[lib]
+name = "mdbijou"
+path = "src/lib.rs"
+
 [features]
-default = ["highlight", "editor", "remote-images"]
-# Shared syntax highlighting engine (syntect), used by preview code blocks and the editor
-highlight = ["dep:syntect"]
-# Simple source editor (edit/preview toggle)
-editor = []
-# Minimal regex-based highlighting fallback (much smaller, lower quality)
-lite-highlight = []
-# Remote (http/https) image download support
-remote-images = ["dep:ureq"]
+default = []
 
 [dependencies]
-eframe = { version = "0.33", default-features = false, features = [
-    "glow",
-    "persistence",
-    "accesskit",
-] }
-egui = "0.33"
-egui-phosphor = { version = "0.11", default-features = false, features = ["regular"] }
 pulldown-cmark = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+url = "2"
 directories = "6"
-notify = "8"
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "gif",
-    "webp",
-] }
-ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 log = "0.4"
-env_logger = "0.11"
-memmap2 = "0.9"
 rfd = "0.15"
-raw-window-handle = "0.6"
-syntect = { version = "5", optional = true }
 html5ever = "0.39.0"
 markup5ever_rcdom = "0.39.0"
 # Headless Mermaid.js-parity rendering (pinned to mermaid@11.12.3). 0.7+/0.8
 # require rustc 1.95; 0.6.2 is the newest release compatible with our 1.92 toolchain.
-merman = { version = "0.6.2", default-features = false, features = ["render"] }
-# Rasterize merman's SVG output into an egui texture (resvg re-exports usvg + tiny-skia).
-resvg = "0.48"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSButton"] }
-objc2-foundation = { version = "0.3", features = [
-    "NSArray",
-    "NSNotification",
-    "NSString",
-] }
+merman = { version = "0.6.2", default-features = false, features = ["raster"] }
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+# Keep the 0.5.1 API surface, with the upstream list-width correction from
+# longbridge/gpui-component#2158 backported locally.  Current `main` requires
+# a newer GPUI, so a full upstream checkout is intentionally not used here.
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui_http_client = "=0.2.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+futures = "0.3"
 
 [profile.release]
 opt-level = "z"
