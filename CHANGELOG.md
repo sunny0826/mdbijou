@@ -1,6 +1,16 @@
 # Changelog
 
-## v0.0.3 (unreleased)
+## v0.0.4 (unreleased)
+
+### Changed
+
+- macOS: migrate the native application shell, editor, settings window, toolbar, scrolling preview, and document rendering to GPUI while retaining Markdown, HTML, MDX, Mermaid, theme, and accessibility behavior _(PR [#16](https://github.com/sunny0826/mdbijou/pull/16) by [@sunny0826](https://github.com/sunny0826))_
+
+### Fixed
+
+- macOS: restore responsive preview margins, directory navigation, icons, Mermaid sizing, and reliable remote-image loading when a stale localhost proxy is configured _(PR [#16](https://github.com/sunny0826/mdbijou/pull/16) by [@sunny0826](https://github.com/sunny0826))_
+
+## v0.0.3
 
 ### Added
 
