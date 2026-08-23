@@ -3,15 +3,16 @@
 //! All Markdown blocks use MDbijou's native renderer so the preview stays
 //! faithful to the selected document theme and extension rendering.
 
+use crate::color::Color;
 use crate::config::Config;
 use crate::document::{Align, Block, Document, Inline};
 use crate::html;
 use crate::image_source::resolve_local_path;
 use crate::{mermaid, theme::Theme};
 use gpui::{
-    div, img, prelude::FluentBuilder, px, AnyElement, FontStyle, FontWeight, HighlightStyle,
-    InteractiveElement, IntoElement, ObjectFit, ParentElement, StrikethroughStyle, Styled,
-    StyledImage, StyledText, UnderlineStyle,
+    div, img, prelude::FluentBuilder, px, AnyElement, Font, FontFallbacks, FontStyle, FontWeight,
+    HighlightStyle, InteractiveElement, IntoElement, ObjectFit, ParentElement, StrikethroughStyle,
+    Styled, StyledImage, StyledText, UnderlineStyle,
 };
 use gpui_component::{Icon, IconName};
 use std::cell::RefCell;
@@ -250,6 +251,17 @@ fn preview_font_family(id: &str) -> &'static str {
     }
 }
 
+/// Editorial display face for headings: a serif with CJK fallback so Latin
+/// and Chinese headings share one typographic voice. New York ships with macOS.
+fn heading_font() -> Font {
+    let mut font = gpui::font("New York");
+    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        "Songti SC".into(),
+        "PingFang SC".into(),
+    ]));
+    font
+}
+
 fn block_element(
     block: &Block,
     base_dir: &Path,
@@ -262,17 +274,21 @@ fn block_element(
             inlines,
             align,
         } => {
-            let element = div()
-                .mt(px(if *level == 1 { 28.0 } else { 20.0 }))
-                .mb(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(inline_text(inlines, theme));
-            let element = match level {
-                1 => element.text_3xl(),
-                2 => element.text_2xl(),
-                3 => element.text_xl(),
-                _ => element.text_lg(),
+            let (size, line, weight, margin_top) = match level {
+                1 => (32.0, 42.0, FontWeight::BOLD, 36.0),
+                2 => (25.0, 34.0, FontWeight::SEMIBOLD, 30.0),
+                3 => (20.0, 28.0, FontWeight::SEMIBOLD, 24.0),
+                _ => (17.0, 24.0, FontWeight::SEMIBOLD, 20.0),
             };
+            let element = div()
+                .mt(px(margin_top))
+                .mb(px(10.0))
+                .font(heading_font())
+                .font_weight(weight)
+                .text_size(px(size))
+                .line_height(px(line))
+                .text_color(theme_color(theme.c.heading))
+                .child(inline_text(inlines, theme));
             text_align(element, *align).into_any_element()
         }
         Block::Paragraph { inlines, align } => {
@@ -312,12 +328,14 @@ fn block_element(
         Block::TaskList { checked, items } => {
             let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(8.0));
             for (index, item) in items.iter().enumerate() {
-                let marker = if checked.get(index).copied().unwrap_or(false) {
-                    "☑"
-                } else {
-                    "☐"
-                };
-                list = list.child(list_row(marker, item, base_dir, theme, remote_images));
+                let done = checked.get(index).copied().unwrap_or(false);
+                list = list.child(list_row(
+                    task_checkbox(done, theme).into_any_element(),
+                    item,
+                    base_dir,
+                    theme,
+                    remote_images,
+                ));
             }
             list.into_any_element()
         }
@@ -413,8 +431,8 @@ fn card_group_element(
             .flex_1()
             .min_w(px(220.0))
             .p(px(16.0))
-            .rounded(px(12.0))
-            .bg(theme_color(theme.c.quote_bg))
+            .rounded(px(crate::theme::RADIUS_LG))
+            .bg(theme_color(theme.c.surface))
             .border_1()
             .border_color(theme_color(theme.c.table_border))
             .child(header)
@@ -471,15 +489,15 @@ fn steps_element(
                 .gap(px(12.0))
                 .child(
                     div()
-                        .w(px(24.0))
-                        .h(px(24.0))
+                        .w(px(26.0))
+                        .h(px(26.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(12.0))
-                        .bg(theme_color(theme.c.link))
-                        .text_color(theme_color(theme.c.background))
+                        .rounded(px(13.0))
+                        .bg(theme_color(theme.c.selection_bg))
+                        .text_color(theme_color(theme.c.link))
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child((index + 1).to_string()),
@@ -515,23 +533,56 @@ fn list_element(
     let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(8.0));
     for (index, item) in items.iter().enumerate() {
         let marker = if ordered {
-            format!("{}.", start + index as u64)
+            div().child(format!("{}.", start + index as u64))
         } else {
-            "•".into()
+            div().child("•")
         };
-        list = list.child(list_row(marker, item, base_dir, theme, remote_images));
+        list = list.child(list_row(
+            marker.into_any_element(),
+            item,
+            base_dir,
+            theme,
+            remote_images,
+        ));
     }
     list.into_any_element()
 }
 
+/// A drawn checkbox (empty or checked with a check mark) for task lists.
+fn task_checkbox(checked: bool, theme: &Theme) -> impl IntoElement {
+    div()
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme_color(if checked {
+            theme.c.link
+        } else {
+            theme.c.table_border
+        }))
+        .bg(theme_color(if checked {
+            theme.c.link
+        } else {
+            theme.c.background
+        }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(checked, |box_| {
+            box_.child(
+                Icon::new(IconName::Check)
+                    .size_3p5()
+                    .text_color(theme_color(theme.c.background)),
+            )
+        })
+}
+
 fn list_row(
-    marker: impl Into<gpui::SharedString>,
+    marker: AnyElement,
     blocks: &[Block],
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
 ) -> AnyElement {
-    let marker: gpui::SharedString = marker.into();
     let mut content = div().flex_1();
     for block in blocks {
         content = content.child(block_element(block, base_dir, theme, remote_images));
@@ -542,6 +593,10 @@ fn list_row(
         .child(
             div()
                 .w(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_color(theme_color(theme.c.link))
                 .child(marker),
         )
@@ -586,9 +641,15 @@ fn image_element(
 ) -> AnyElement {
     let muted = theme_color(theme.c.muted);
     let image_bg = theme_color(theme.c.image_bg);
+    let border = theme_color(theme.c.table_border);
     let image = if is_remote_url(src) {
         match remote_images.image_for(src) {
-            RemoteImageStatus::Ready(image) => img(image).max_w_full().into_any_element(),
+            RemoteImageStatus::Ready(image) => img(image)
+                .max_w_full()
+                .rounded(px(crate::theme::RADIUS_MD))
+                .border_1()
+                .border_color(border)
+                .into_any_element(),
             RemoteImageStatus::Loading => image_loading(muted),
             RemoteImageStatus::Failed(reason) => {
                 remote_image_fallback(alt, &reason, muted, image_bg)
@@ -600,6 +661,9 @@ fn image_element(
             .unwrap_or_else(|| gpui::ImageSource::from(src.to_owned()));
         img(source)
             .max_w_full()
+            .rounded(px(crate::theme::RADIUS_MD))
+            .border_1()
+            .border_color(border)
             .with_loading(move || image_loading(muted))
             .with_fallback({
                 let alt = alt.to_string();
@@ -673,15 +737,279 @@ fn remote_image_fallback(
 }
 
 fn code_block_element(lang: Option<&str>, text: &str, theme: &Theme) -> AnyElement {
+    let code = text.trim_end_matches('\n');
+    let highlights = code_highlight_styles(lang, code, theme);
     div()
         .mb(px(18.0))
-        .p(px(16.0))
-        .rounded(px(8.0))
+        .rounded(px(crate::theme::RADIUS_MD))
+        .border_1()
+        .border_color(theme_color(theme.c.table_border))
         .bg(theme_color(theme.c.code_bg))
-        .text_color(theme_color(theme.c.code_fg))
-        .font_family("Menlo")
-        .child(format!("{}\n{text}", lang.unwrap_or("text")))
+        .overflow_hidden()
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(6.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme_color(theme.c.table_border))
+                .bg(theme_color(theme.c.surface))
+                .child(
+                    div()
+                        .font_family("Menlo")
+                        .text_xs()
+                        .text_color(theme_color(theme.c.muted))
+                        .child(lang.unwrap_or("text").to_string()),
+                ),
+        )
+        .child(
+            div()
+                .p(px(16.0))
+                .font_family("Menlo")
+                .text_size(px(13.0))
+                .line_height(px(20.0))
+                .text_color(theme_color(theme.c.code_fg))
+                .child(StyledText::new(code.to_owned()).with_highlights(highlights)),
+        )
         .into_any_element()
+}
+
+// ---------------------------------------------------------------------------
+// Preview code-block syntax highlighting
+//
+// A small, allocation-light byte scanner that maps tokens onto the active
+// theme's `SyntaxColors`. It intentionally does not pull in a full tree-sitter
+// grammar: preview code stays fast to rebuild on every rerender and shares the
+// same palette as the rest of the document.
+// ---------------------------------------------------------------------------
+
+const COMMON_KEYWORDS: &[&str] = &[
+    "if",
+    "else",
+    "for",
+    "while",
+    "return",
+    "break",
+    "continue",
+    "true",
+    "false",
+    "null",
+    "undefined",
+    "new",
+    "class",
+    "function",
+    "var",
+    "import",
+    "export",
+    "from",
+    "default",
+    "as",
+    "try",
+    "catch",
+    "finally",
+    "throw",
+    "this",
+    "typeof",
+    "instanceof",
+    "void",
+    "delete",
+    "switch",
+    "case",
+    "do",
+    "in",
+    "of",
+    "static",
+    "const",
+    "let",
+    "async",
+    "await",
+];
+
+const RUST_KEYWORDS: &[&str] = &[
+    "fn", "let", "mut", "const", "pub", "use", "mod", "struct", "enum", "impl", "trait", "match",
+    "async", "await", "move", "ref", "self", "Self", "super", "type", "where", "loop", "dyn",
+    "unsafe", "extern", "crate", "return", "if", "else", "for", "while", "break", "continue", "in",
+    "true", "false", "as",
+];
+
+const PY_KEYWORDS: &[&str] = &[
+    "def", "class", "return", "if", "elif", "else", "for", "while", "break", "continue", "pass",
+    "import", "from", "as", "try", "except", "finally", "raise", "with", "lambda", "yield",
+    "global", "nonlocal", "del", "not", "and", "or", "is", "in", "assert", "async", "await",
+    "True", "False", "None",
+];
+
+fn language_keywords(lang: Option<&str>) -> &'static [&'static str] {
+    match lang.map(|name| name.to_ascii_lowercase()).as_deref() {
+        Some("rs" | "rust") => RUST_KEYWORDS,
+        Some("py" | "python") => PY_KEYWORDS,
+        Some("js" | "javascript" | "ts" | "typescript" | "jsx" | "tsx") => COMMON_KEYWORDS,
+        _ => COMMON_KEYWORDS,
+    }
+}
+
+fn code_highlight_styles(
+    lang: Option<&str>,
+    code: &str,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    let syntax = &theme.syntax;
+    let keywords = language_keywords(lang);
+    let bytes = code.as_bytes();
+    let n = bytes.len();
+    let mut styles = Vec::new();
+    let push = |styles: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>,
+                start: usize,
+                end: usize,
+                color: Color| {
+        if start < end {
+            styles.push((
+                start..end,
+                HighlightStyle {
+                    color: Some(theme_color(color)),
+                    ..Default::default()
+                },
+            ));
+        }
+    };
+
+    let mut i = 0;
+    while i < n {
+        let b = bytes[i];
+        // Line comments.
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'/'
+            || (matches!(
+                lang.map(|name| name.to_ascii_lowercase()).as_deref(),
+                Some("py" | "python" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "toml")
+            ) && b == b'#')
+        {
+            let start = i;
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            push(&mut styles, start, i, syntax.comment);
+            continue;
+        }
+        // Block comments.
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let start = i;
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            push(&mut styles, start, i, syntax.comment);
+            continue;
+        }
+        // Strings (single, double, backtick) with backslash escapes.
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let quote = b;
+            let start = i;
+            i += 1;
+            while i < n {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(n);
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            push(&mut styles, start, i, syntax.string);
+            continue;
+        }
+        // Numbers (decimals, hex prefixes, floats).
+        if b.is_ascii_digit() || (b == b'.' && i + 1 < n && bytes[i + 1].is_ascii_digit()) {
+            let start = i;
+            while i < n
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            push(&mut styles, start, i, syntax.number);
+            continue;
+        }
+        // Identifiers: keywords, function calls, type-like names.
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &code[start..i];
+            if keywords.contains(&word) {
+                push(&mut styles, start, i, syntax.keyword);
+            } else {
+                // Allow a trailing macro bang (`println!`) before the call
+                // paren so macro invocations read as function calls.
+                let mut next = i;
+                while next < n && (bytes[next] == b' ' || bytes[next] == b'\t') {
+                    next += 1;
+                }
+                if next < n && bytes[next] == b'!' {
+                    next += 1;
+                    while next < n && (bytes[next] == b' ' || bytes[next] == b'\t') {
+                        next += 1;
+                    }
+                }
+                if next < n && bytes[next] == b'(' {
+                    push(&mut styles, start, i, syntax.function);
+                } else if word.starts_with(|c: char| c.is_uppercase()) {
+                    push(&mut styles, start, i, syntax.typ);
+                }
+            }
+            continue;
+        }
+        // Operators / punctuation runs.
+        if matches!(
+            b,
+            b'=' | b'+'
+                | b'-'
+                | b'*'
+                | b'/'
+                | b'%'
+                | b'<'
+                | b'>'
+                | b'!'
+                | b'&'
+                | b'|'
+                | b'^'
+                | b'~'
+                | b'?'
+                | b':'
+                | b'@'
+        ) {
+            let start = i;
+            while i < n
+                && matches!(
+                    bytes[i],
+                    b'=' | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'/'
+                        | b'%'
+                        | b'<'
+                        | b'>'
+                        | b'!'
+                        | b'&'
+                        | b'|'
+                        | b'^'
+                        | b'~'
+                        | b'?'
+                        | b':'
+                        | b'@'
+                )
+            {
+                i += 1;
+            }
+            push(&mut styles, start, i, syntax.operator);
+            continue;
+        }
+        i += 1;
+    }
+    styles
 }
 
 fn mermaid_element(source: &str, theme: &Theme) -> Option<AnyElement> {
@@ -855,6 +1183,7 @@ fn append_styled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Range;
 
     #[test]
     fn recognizes_remote_http_sources() {
@@ -876,5 +1205,78 @@ mod tests {
     fn curl_fallback_fetches_redirecting_jpeg() {
         let bytes = fetch_with_curl("https://picsum.photos/400/200").unwrap();
         assert!(bytes.starts_with(&[0xff, 0xd8, 0xff]));
+    }
+
+    fn bijou_theme() -> Theme {
+        crate::theme::builtin("bijou-light").expect("bijou-light theme exists")
+    }
+
+    fn styled_at(styles: &[(Range<usize>, HighlightStyle)], pos: usize) -> Option<HighlightStyle> {
+        styles
+            .iter()
+            .find(|(range, _)| range.start <= pos && pos < range.end)
+            .map(|(_, style)| *style)
+    }
+
+    #[test]
+    fn highlights_comments_and_strings() {
+        let theme = bijou_theme();
+        let code = "// note\nlet s = \"hi\"; /* block */";
+        let styles = code_highlight_styles(Some("rust"), code, &theme);
+        let comment = theme_color(theme.syntax.comment);
+        let string = theme_color(theme.syntax.string);
+        assert_eq!(styled_at(&styles, 3).unwrap().color, Some(comment));
+        assert_eq!(styled_at(&styles, 17).unwrap().color, Some(string));
+        assert_eq!(styled_at(&styles, 27).unwrap().color, Some(comment));
+        // Every range must respect UTF-8 boundaries of the source.
+        for (range, _) in &styles {
+            assert!(code.is_char_boundary(range.start));
+            assert!(code.is_char_boundary(range.end));
+        }
+    }
+
+    #[test]
+    fn highlights_keywords_numbers_and_functions() {
+        let theme = bijou_theme();
+        let code = "fn main() { let x = 42; println!(\"v\"); }";
+        let styles = code_highlight_styles(Some("rust"), code, &theme);
+        let keyword = theme_color(theme.syntax.keyword);
+        let function = theme_color(theme.syntax.function);
+        let number = theme_color(theme.syntax.number);
+        assert_eq!(styled_at(&styles, 0).unwrap().color, Some(keyword)); // fn
+        assert_eq!(styled_at(&styles, 13).unwrap().color, Some(keyword)); // let
+        assert_eq!(styled_at(&styles, 21).unwrap().color, Some(number)); // 42
+        assert_eq!(styled_at(&styles, 27).unwrap().color, Some(function)); // println
+    }
+
+    #[test]
+    fn highlights_uppercase_identifiers_as_types() {
+        let theme = bijou_theme();
+        let code = "let name: String = \"x\";";
+        let styles = code_highlight_styles(Some("rust"), code, &theme);
+        let typ = theme_color(theme.syntax.typ);
+        assert_eq!(styled_at(&styles, 11).unwrap().color, Some(typ));
+    }
+
+    #[test]
+    fn handles_cjk_inside_strings_without_boundary_breakage() {
+        let theme = bijou_theme();
+        let code = "println!(\"你好，世界\");";
+        let styles = code_highlight_styles(Some("rust"), code, &theme);
+        let string = theme_color(theme.syntax.string);
+        assert_eq!(styled_at(&styles, 9).unwrap().color, Some(string));
+        for (range, _) in &styles {
+            assert!(code.is_char_boundary(range.start));
+            assert!(code.is_char_boundary(range.end));
+        }
+    }
+
+    #[test]
+    fn handles_unterminated_string_without_panicking() {
+        let theme = bijou_theme();
+        let code = "let s = \"oops";
+        let styles = code_highlight_styles(Some("rust"), code, &theme);
+        let string = theme_color(theme.syntax.string);
+        assert_eq!(styled_at(&styles, 8).unwrap().color, Some(string));
     }
 }

@@ -155,8 +155,8 @@ impl GpuiMdbijouApp {
             return;
         }
         let id = match window.appearance() {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => "github-dark",
-            _ => "github-light",
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => "bijou-dark",
+            _ => "bijou-light",
         };
         if let Some(theme) = theme::builtin(id) {
             self.theme = theme;
@@ -466,7 +466,6 @@ impl GpuiMdbijouApp {
         } else {
             self.title.to_string()
         };
-        let app = cx.entity();
         TitleBar::new().child(
             div()
                 .relative()
@@ -553,19 +552,32 @@ impl GpuiMdbijouApp {
                                         ),
                                 )
                                 .child(
-                                    Switch::new("view-switch")
-                                        .checked(self.view == View::Preview)
-                                        .label(if self.view == View::Preview {
-                                            "预览"
-                                        } else {
-                                            "编辑"
-                                        })
-                                        .tooltip("切换预览与编辑（⌘E）")
-                                        .on_click(move |preview, _, cx| {
-                                            app.update(cx, |this, cx| {
-                                                this.set_preview(*preview, cx)
-                                            });
-                                        }),
+                                    div()
+                                        .flex()
+                                        .p(px(2.0))
+                                        .gap(px(2.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(theme_color(self.theme.c.code_bg))
+                                        .border_1()
+                                        .border_color(theme_color(self.theme.c.table_border))
+                                        .child(view_segment(
+                                            "view-edit",
+                                            "编辑",
+                                            self.view == View::Edit,
+                                            &self.theme,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.set_preview(false, cx)
+                                            }),
+                                        ))
+                                        .child(view_segment(
+                                            "view-preview",
+                                            "预览",
+                                            self.view == View::Preview,
+                                            &self.theme,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.set_preview(true, cx)
+                                            }),
+                                        )),
                                 ),
                         ),
                 ),
@@ -585,8 +597,9 @@ impl GpuiMdbijouApp {
                 div()
                     .mb(px(12.0))
                     .px(px(8.0))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_xs()
+                    .font_family("Menlo")
+                    .text_color(theme_color(self.theme.c.muted))
                     .child("目录"),
             );
         for (index, location) in toc::extract_with_root_indices(&self.document.blocks)
@@ -598,11 +611,12 @@ impl GpuiMdbijouApp {
             panel = panel.child(
                 div()
                     .id(("toc-entry", index))
+                    .relative()
                     .h(px(30.0))
                     .mb(px(2.0))
                     .pl(indent)
                     .pr(px(8.0))
-                    .rounded(px(6.0))
+                    .rounded(px(theme::RADIUS_SM))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -612,6 +626,18 @@ impl GpuiMdbijouApp {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                     })
                     .hover(|this| this.bg(theme_color(self.theme.c.surface_hover)))
+                    .when(active, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(px(7.0))
+                                .bottom(px(7.0))
+                                .w(px(3.0))
+                                .rounded(px(2.0))
+                                .bg(theme_color(self.theme.c.link)),
+                        )
+                    })
                     .child(div().truncate().child(location.entry.title))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_toc = Some(index);
@@ -637,12 +663,12 @@ impl GpuiMdbijouApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::rgba(0x00000044))
+                .bg(gpui::rgba(0x0000001f))
                 .child(
                     div()
                         .w(px(420.0))
                         .p(px(24.0))
-                        .rounded(px(12.0))
+                        .rounded(px(theme::RADIUS_LG))
                         .bg(theme_color(self.theme.c.background))
                         .text_color(theme_color(self.theme.c.foreground))
                         .child(
@@ -998,6 +1024,8 @@ impl Render for GpuiMdbijouApp {
                         .size_full()
                         .flex()
                         .flex_col()
+                        .pt(px(40.0))
+                        .pb(px(96.0))
                         .track_scroll(&self.preview_scroll)
                         .overflow_y_scroll()
                         .children(gpui_preview::document_blocks(
@@ -1030,7 +1058,13 @@ impl Render for GpuiMdbijouApp {
             .min_h_0()
             .bg(theme_color(self.theme.c.background))
             .text_color(theme_color(self.theme.c.foreground))
-            .child(self.toolbar(cx))
+            .child(
+                div()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(theme_color(self.theme.c.table_border))
+                    .child(self.toolbar(cx)),
+            )
             .child(main);
         if let Some(feedback) = &self.feedback {
             content = content.child(
@@ -1075,22 +1109,46 @@ impl GpuiMdbijouApp {
         let words = self.document.text.split_whitespace().count();
         let lines = self.document.text.lines().count().max(1);
         div()
-            .h(px(26.0))
-            .px(px(20.0))
+            .h(px(28.0))
+            .px(px(16.0))
             .flex()
             .items_center()
             .justify_between()
             .border_t_1()
             .border_color(theme_color(self.theme.c.table_border))
             .bg(theme_color(self.theme.c.surface))
-            .text_sm()
+            .text_xs()
             .text_color(theme_color(self.theme.c.muted))
-            .child(if self.view == View::Preview {
-                "预览"
-            } else {
-                "编辑"
-            })
-            .child(format!("{lines} 行 · {words} 词"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded(px(3.0))
+                            .bg(theme_color(self.theme.c.link)),
+                    )
+                    .child(if self.view == View::Preview {
+                        "预览"
+                    } else {
+                        "编辑"
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(16.0))
+                    .child(format!("{lines} 行 · {words} 词"))
+                    .child(
+                        div()
+                            .font_family("Menlo")
+                            .text_color(theme_color(self.theme.c.muted))
+                            .child(self.theme.id.clone()),
+                    ),
+            )
     }
 }
 
@@ -1101,6 +1159,51 @@ fn document_title(document: &Document) -> String {
         .and_then(|path| path.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled.md".into())
+}
+
+/// A single segment of the view segmented control in the toolbar.
+fn view_segment(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .text_sm()
+        .cursor_pointer()
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::MEDIUM
+        })
+        .text_color(theme_color(if active {
+            theme.c.foreground
+        } else {
+            theme.c.muted
+        }))
+        .when(active, |segment| {
+            segment
+                .bg(theme_color(theme.c.background))
+                .border_1()
+                .border_color(theme_color(theme.c.table_border))
+        })
+        .hover(|segment| {
+            segment.bg(theme_color(if active {
+                theme.c.background
+            } else {
+                theme.c.surface_hover
+            }))
+        })
+        .child(label)
+        .on_click(on_click)
 }
 
 fn theme_color(color: crate::color::Color) -> gpui::Hsla {

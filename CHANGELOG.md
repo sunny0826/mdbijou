@@ -2,8 +2,16 @@
 
 ## v0.0.4 (unreleased)
 
+### Added
+
+- macOS: preview code blocks now show a language header bar with syntax highlighting (comments, strings, numbers, keywords, functions, types, operators) colored from the active theme's palette _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
+
 ### Changed
 
+- macOS: make the warm paper `bijou-light` theme the default and follow the system appearance between the bijou light/dark pair; share border, radius, and modal-overlay values as design tokens so panels and dialogs stay consistent _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: preview headings use an editorial serif display face (New York with Songti/PingFang fallback) with a stronger size hierarchy, and the default body line spacing is now 1.6 _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: edit/preview is now a segmented control; the toolbar gains a hairline divider; the status bar shows a mode indicator and the theme name in monospace; the table-of-contents highlights the active entry with an accent bar _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: MDX cards and step badges move to the muted pastel palette, task lists render as drawn checkboxes instead of text glyphs, and preview images get rounded corners with hairline borders _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: migrate the native application shell, editor, settings window, toolbar, scrolling preview, and document rendering to GPUI while retaining Markdown, HTML, MDX, Mermaid, theme, and accessibility behavior _(PR [#16](https://github.com/sunny0826/mdbijou/pull/16) by [@sunny0826](https://github.com/sunny0826))_
 
 ### Fixed

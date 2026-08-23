@@ -79,6 +79,19 @@ fn hex(s: &str) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Design tokens (shared spacing / rounding language)
+// ---------------------------------------------------------------------------
+
+/// Small radius: inline chips, segmented control segments, small controls.
+pub const RADIUS_SM: f32 = 6.0;
+/// Medium radius: code blocks, tables, callouts.
+pub const RADIUS_MD: f32 = 8.0;
+/// Large radius: cards, dialogs, floating surfaces.
+pub const RADIUS_LG: f32 = 12.0;
+/// Hairline border width used across chrome and components.
+pub const BORDER_WIDTH: f32 = 1.0;
+
+// ---------------------------------------------------------------------------
 // Builtin themes
 // ---------------------------------------------------------------------------
 
@@ -249,7 +262,9 @@ fn sepia() -> Theme {
 
 fn bijou_light() -> Theme {
     let c = Colors {
-        background: hex("#FCFCF9"),
+        // Warm paper canvas; chrome surfaces sit one step whiter than the
+        // reading column (paper + card metaphor).
+        background: hex("#F7F6F3"),
         foreground: hex("#1A1E23"),
         heading: hex("#11151A"),
         muted: hex("#6B7785"),
@@ -265,8 +280,8 @@ fn bijou_light() -> Theme {
         hr: hex("#E8E0D0"),
         selection_bg: hex("#B8E6DD"),
         image_bg: hex("#F2EFE6"),
-        surface: hex("#F6F3EB"),
-        surface_hover: hex("#EDE9DF"),
+        surface: hex("#FCFCF9"),
+        surface_hover: hex("#F1EDE4"),
         focus: hex("#0A7D6B"),
         success: hex("#2DA44E"),
         error: hex("#CF222E"),
