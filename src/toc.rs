@@ -5,8 +5,7 @@
 //! blocks) so the TOC panel mirrors exactly what the preview renders. Each
 //! entry gets a stable, unique anchor via [`slugify`].
 
-use crate::document::Block;
-use crate::render::inline_text;
+use crate::document::{inlines_plain, Block};
 use std::collections::HashMap;
 
 /// One TOC row: heading level (1..=6), flattened title text, and a stable
@@ -18,54 +17,86 @@ pub struct TocEntry {
     pub anchor: String,
 }
 
+/// A TOC entry together with the index of its containing top-level document
+/// block. The preview uses that index as its native GPUI scroll target, so a
+/// heading nested in a quote/list still scrolls to the correct rendered unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TocLocation {
+    pub entry: TocEntry,
+    pub root_block_index: usize,
+}
+
 /// Extract every heading from `blocks`, in document order, assigning each a
 /// unique anchor (duplicate titles get `-2`, `-3`, … suffixes).
 pub fn extract(blocks: &[Block]) -> Vec<TocEntry> {
+    extract_with_root_indices(blocks)
+        .into_iter()
+        .map(|location| location.entry)
+        .collect()
+}
+
+/// Extract headings and retain the top-level block each belongs to.
+pub fn extract_with_root_indices(blocks: &[Block]) -> Vec<TocLocation> {
     let mut out = Vec::new();
     let mut used = HashMap::new();
-    walk(blocks, &mut out, &mut used);
+    for (root_block_index, block) in blocks.iter().enumerate() {
+        walk(
+            std::slice::from_ref(block),
+            root_block_index,
+            &mut out,
+            &mut used,
+        );
+    }
     out
 }
 
-fn walk(blocks: &[Block], out: &mut Vec<TocEntry>, used: &mut HashMap<String, usize>) {
+fn walk(
+    blocks: &[Block],
+    root_block_index: usize,
+    out: &mut Vec<TocLocation>,
+    used: &mut HashMap<String, usize>,
+) {
     for block in blocks {
         match block {
             Block::Heading { level, inlines, .. } => {
-                let title = inline_text(inlines);
+                let title = inlines_plain(inlines);
                 let anchor = unique_anchor(&slugify(&title), used);
-                out.push(TocEntry {
-                    level: *level,
-                    title,
-                    anchor,
+                out.push(TocLocation {
+                    entry: TocEntry {
+                        level: *level,
+                        title,
+                        anchor,
+                    },
+                    root_block_index,
                 });
             }
-            Block::BlockQuote { blocks } => walk(blocks, out, used),
+            Block::BlockQuote { blocks } => walk(blocks, root_block_index, out, used),
             Block::List { items, .. } => {
                 for item in items {
-                    walk(item, out, used);
+                    walk(item, root_block_index, out, used);
                 }
             }
             Block::TaskList { items, .. } => {
                 for item in items {
-                    walk(item, out, used);
+                    walk(item, root_block_index, out, used);
                 }
             }
             Block::CardGroup { cards, .. } => {
                 for card in cards {
-                    walk(&card.blocks, out, used);
+                    walk(&card.blocks, root_block_index, out, used);
                 }
             }
             Block::Steps { items } => {
                 for step in items {
-                    walk(&step.blocks, out, used);
+                    walk(&step.blocks, root_block_index, out, used);
                 }
             }
-            Block::Footnote { blocks, .. } => walk(blocks, out, used),
+            Block::Footnote { blocks, .. } => walk(blocks, root_block_index, out, used),
             // HTML fragments are converted to IR the same way the preview
             // renders them, so traversal order stays identical.
             Block::Html(raw) => {
                 if let Some(blocks) = crate::html::html_blocks(raw) {
-                    walk(&blocks, out, used);
+                    walk(&blocks, root_block_index, out, used);
                 }
             }
             _ => {}
@@ -164,6 +195,19 @@ mod tests {
         let toc = extract(&blocks);
         let anchors: Vec<&str> = toc.iter().map(|e| e.anchor.as_str()).collect();
         assert_eq!(anchors, vec!["intro", "intro-2", "intro-3"]);
+    }
+
+    #[test]
+    fn locations_target_the_owning_top_level_block() {
+        let blocks = vec![
+            Block::BlockQuote {
+                blocks: vec![heading(2, "Quoted")],
+            },
+            heading(1, "Top"),
+        ];
+        let locations = extract_with_root_indices(&blocks);
+        assert_eq!(locations[0].root_block_index, 0);
+        assert_eq!(locations[1].root_block_index, 1);
     }
 
     #[test]

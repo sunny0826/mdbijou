@@ -846,7 +846,11 @@ fn sink_inline(stack: &mut [Ctx], out: &mut Vec<Block>, inl: Inline) {
     }
 }
 
-fn inline_plain(i: &Inline) -> String {
+/// Convert inline content to its readable text representation.
+///
+/// This is deliberately presentation-neutral so native front ends can use the
+/// document IR without depending on the legacy egui preview renderer.
+pub fn inline_plain(i: &Inline) -> String {
     match i {
         Inline::Text(s) => s.clone(),
         Inline::Code(s) => s.clone(),
@@ -859,6 +863,11 @@ fn inline_plain(i: &Inline) -> String {
         Inline::InlineHtml(s) | Inline::Math(s) => s.clone(),
         Inline::FootnoteRef(s) => format!("[^{s}]"),
     }
+}
+
+/// Convert a sequence of inline nodes to readable text.
+pub fn inlines_plain(inlines: &[Inline]) -> String {
+    inlines.iter().map(inline_plain).collect()
 }
 
 /// Merge adjacent `Text` segments (pulldown-cmark can split text across events).
@@ -896,7 +905,7 @@ mod tests {
     }
 
     fn inline_plain_all(inlines: &[Inline]) -> String {
-        inlines.iter().map(inline_plain).collect()
+        inlines_plain(inlines)
     }
 
     #[test]

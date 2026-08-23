@@ -83,8 +83,8 @@ clean:
 # ---------- 极简体积构建（去掉语法高亮） ----------
 # 体积敏感时关闭 highlight（用轻量高亮）构建
 release-minus:
-    cargo build --release --no-default-features --features "editor,remote-images"
-    @echo "built WITHOUT syntect highlight (smaller)"
+    cargo build --release --no-default-features
+    @echo "built with the GPUI renderer"
 
 release-lite:
-    cargo build --release --no-default-features --features "editor,remote-images,lite-highlight"
+    cargo build --release --no-default-features
