@@ -37,10 +37,10 @@ pub enum View {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: "github-light".into(),
+            theme: "bijou-light".into(),
             font_family: "default".into(),
             font_size: 16.0,
-            line_height: 1.5,
+            line_height: 1.6,
             content_width: 720.0,
             follow_system_theme: false,
             default_view: View::Preview,
