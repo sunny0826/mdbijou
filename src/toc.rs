@@ -223,7 +223,7 @@ mod tests {
                 items: vec![vec![heading(3, "Listed")]],
             },
             Block::TaskList {
-                checked: vec![false],
+                checked: vec![Some(false)],
                 items: vec![vec![heading(4, "Tasked")]],
             },
             Block::Footnote {

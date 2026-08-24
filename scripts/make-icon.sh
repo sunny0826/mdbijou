@@ -17,8 +17,12 @@ ICONSET="$OUT_DIR/mdbijou.iconset"
 ICNS="$OUT_DIR/mdbijou.icns"
 
 # Step 1: compose the macOS-style master icon (best effort).
-if python3 -c "import PIL" 2>/dev/null; then
+# logo.png is the full-bleed source art; when it is absent the existing
+# master PNG is reused as-is so the icns can still be rebuilt.
+if [[ -f "$SRC" ]] && python3 -c "import PIL" 2>/dev/null; then
     python3 "$(dirname "$0")/icon-compose.py" "$SRC" "$MASTER"
+elif [[ ! -f "$SRC" ]]; then
+    echo "note: $SRC not found, reusing existing $MASTER" >&2
 else
     echo "note: Pillow not found, using $SRC as-is (flat icon)" >&2
     MASTER="$SRC"

@@ -4,10 +4,15 @@
 
 ### Added
 
+- macOS: keyboard-shortcut regression tests simulate real ⌘-key dispatch through the focus path, so shortcut regressions now fail `cargo test` instead of shipping silently _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: the Settings window closes with `Esc`, and the Dock icon now shows the app artwork in dev builds too (previously only packaged builds had an icon) _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: preview code blocks now show a language header bar with syntax highlighting (comments, strings, numbers, keywords, functions, types, operators) colored from the active theme's palette _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
 
 ### Changed
 
+- macOS: the Settings window is redesigned in the macOS System Settings style — borderless inset groups, a single row of compact theme tiles with live palette previews, tighter rows and steppers; the follow-system-theme toggle was removed _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: toolbar buttons use the official Lucide icon set for a consistent 24-px stroke look _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: preview typography polish — headings scale with the reader font size, H1/H2 gain GitHub-style rules, tables get striped rows, blockquotes gain a quiet fill, code-block headers are calmer, and list markers use the muted color while task checkboxes keep the accent _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: make the warm paper `bijou-light` theme the default and follow the system appearance between the bijou light/dark pair; share border, radius, and modal-overlay values as design tokens so panels and dialogs stay consistent _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: preview headings use an editorial serif display face (New York with Songti/PingFang fallback) with a stronger size hierarchy, and the default body line spacing is now 1.6 _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: edit/preview is now a segmented control; the toolbar gains a hairline divider; the status bar shows a mode indicator and the theme name in monospace; the table-of-contents highlights the active entry with an accent bar _(PR [#17](https://github.com/sunny0826/mdbijou/pull/17) by [@sunny0826](https://github.com/sunny0826))_
@@ -16,6 +21,11 @@
 
 ### Fixed
 
+- macOS: all keyboard shortcuts (⌘O/⌘S/⌘T/⌘E/⌘,/⌘R) stopped responding in the default preview mode after the GPUI migration because the dispatch focus path was empty; the main view now anchors a focus handle so bindings dispatch again _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: clicking Open/Save crashed the app with `RefCell already borrowed` because the sync file dialog blocked inside the click handler; file dialogs are now async sheets whose results apply on the next render pass _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: task-list checkboxes never rendered — blank lines between items hid the `[x]`/`[ ]` markers from the parser; markers are now found and mixed lists render plain bullets for unmarked items _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: list bullets and numbers drifted to the vertical middle of multi-line items; markers now align with the first line and checkboxes center on the first text line _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
+- macOS: long list and table content overflowed the window instead of wrapping (flex `min-width: auto`) _(PR [#18](https://github.com/sunny0826/mdbijou/pull/18) by [@sunny0826](https://github.com/sunny0826))_
 - macOS: restore responsive preview margins, directory navigation, icons, Mermaid sizing, and reliable remote-image loading when a stale localhost proxy is configured _(PR [#16](https://github.com/sunny0826/mdbijou/pull/16) by [@sunny0826](https://github.com/sunny0826))_
 
 ## v0.0.3

@@ -212,8 +212,15 @@ pub fn document_blocks(
         .as_deref()
         .and_then(Path::parent)
         .unwrap_or_else(|| Path::new("."));
+    let base_scale = TypographyScale::from_config(cfg);
+    let first_scale = base_scale.with_first_adjusted();
     let mut elements = Vec::with_capacity(document.blocks.len());
-    for block in &document.blocks {
+    for (index, block) in document.blocks.iter().enumerate() {
+        let scale = if index == 0 {
+            &first_scale
+        } else {
+            &base_scale
+        };
         // The outer, indexed child is deliberately retained: the app's
         // ScrollHandle targets these top-level blocks for TOC navigation.
         // Padding sits outside the constrained reading column so it stays
@@ -233,7 +240,7 @@ pub fn document_blocks(
                         .w_full()
                         .min_w_0()
                         .max_w(px(cfg.content_width.clamp(420.0, 1100.0)))
-                        .child(block_element(block, base_dir, theme, remote_images)),
+                        .child(block_element(block, base_dir, theme, remote_images, scale)),
                 )
                 .into_any_element(),
         );
@@ -262,11 +269,75 @@ fn heading_font() -> Font {
     font
 }
 
+#[derive(Clone)]
+struct TypographyScale {
+    body_line: f32,
+    h1_size: f32,
+    h1_line: f32,
+    h1_mt: f32,
+    h1_mb: f32,
+    h1_pb: f32,
+    h2_size: f32,
+    h2_line: f32,
+    h2_mt: f32,
+    h2_mb: f32,
+    h2_pb: f32,
+    h3_size: f32,
+    h3_line: f32,
+    h3_mt: f32,
+    h3_mb: f32,
+    h4_size: f32,
+    h4_line: f32,
+    h4_mt: f32,
+    h4_mb: f32,
+}
+
+impl TypographyScale {
+    fn from_config(cfg: &Config) -> Self {
+        let base = cfg.font_size.clamp(12.0, 28.0);
+        let h1_size = (base * 2.0).clamp(24.0, 38.0);
+        let h2_size = (base * 1.55).clamp(19.0, 30.0);
+        let h3_size = (base * 1.25).clamp(16.0, 24.0);
+        let h4_size = (base * 1.10).clamp(14.0, 20.0);
+        Self {
+            body_line: (cfg.font_size * cfg.line_height).clamp(16.0, 52.0),
+            h1_size,
+            h1_line: h1_size * 1.31,
+            h1_mt: 28.0,
+            h1_mb: 16.0,
+            h1_pb: 8.0,
+            h2_size,
+            h2_line: h2_size * 1.36,
+            h2_mt: 28.0,
+            h2_mb: 12.0,
+            h2_pb: 6.0,
+            h3_size,
+            h3_line: h3_size * 1.40,
+            h3_mt: 22.0,
+            h3_mb: 8.0,
+            h4_size,
+            h4_line: h4_size * 1.41,
+            h4_mt: 18.0,
+            h4_mb: 6.0,
+        }
+    }
+
+    fn with_first_adjusted(&self) -> Self {
+        let mut s = self.clone();
+        s.h1_mt = 4.0;
+        s.h2_mt = 4.0;
+        s.h3_mt = 4.0;
+        s.h4_mt = 4.0;
+        s
+    }
+}
+
 fn block_element(
     block: &Block,
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
 ) -> AnyElement {
     match block {
         Block::Heading {
@@ -274,22 +345,60 @@ fn block_element(
             inlines,
             align,
         } => {
-            let (size, line, weight, margin_top) = match level {
-                1 => (32.0, 42.0, FontWeight::BOLD, 36.0),
-                2 => (25.0, 34.0, FontWeight::SEMIBOLD, 30.0),
-                3 => (20.0, 28.0, FontWeight::SEMIBOLD, 24.0),
-                _ => (17.0, 24.0, FontWeight::SEMIBOLD, 20.0),
+            let (size, line, weight, mt, mb, pb, with_rule) = match level {
+                1 => (
+                    scale.h1_size,
+                    scale.h1_line,
+                    FontWeight::BOLD,
+                    scale.h1_mt,
+                    scale.h1_mb,
+                    scale.h1_pb,
+                    true,
+                ),
+                2 => (
+                    scale.h2_size,
+                    scale.h2_line,
+                    FontWeight::SEMIBOLD,
+                    scale.h2_mt,
+                    scale.h2_mb,
+                    scale.h2_pb,
+                    true,
+                ),
+                3 => (
+                    scale.h3_size,
+                    scale.h3_line,
+                    FontWeight::SEMIBOLD,
+                    scale.h3_mt,
+                    scale.h3_mb,
+                    0.0,
+                    false,
+                ),
+                _ => (
+                    scale.h4_size,
+                    scale.h4_line,
+                    FontWeight::SEMIBOLD,
+                    scale.h4_mt,
+                    scale.h4_mb,
+                    0.0,
+                    false,
+                ),
             };
-            let element = div()
-                .mt(px(margin_top))
-                .mb(px(10.0))
+            let mut heading = div()
+                .mt(px(mt))
+                .mb(px(mb))
                 .font(heading_font())
                 .font_weight(weight)
                 .text_size(px(size))
                 .line_height(px(line))
                 .text_color(theme_color(theme.c.heading))
                 .child(inline_text(inlines, theme));
-            text_align(element, *align).into_any_element()
+            if with_rule {
+                heading = heading
+                    .pb(px(pb))
+                    .border_b_1()
+                    .border_color(theme_color(theme.c.hr));
+            }
+            text_align(heading, *align).into_any_element()
         }
         Block::Paragraph { inlines, align } => {
             if let [Inline::Image { src, alt, width }] = inlines.as_slice() {
@@ -311,12 +420,17 @@ fn block_element(
             }
         }
         Block::BlockQuote { blocks } => {
-            nested_blocks(blocks, base_dir, theme, remote_images, |content| {
+            nested_blocks(blocks, base_dir, theme, remote_images, scale, |content| {
                 content
                     .mb(px(18.0))
                     .pl(px(18.0))
+                    .pr(px(12.0))
+                    .py(px(8.0))
                     .border_l(px(3.0))
                     .border_color(theme_color(theme.c.blockquote_bar))
+                    .bg(theme_color(theme.c.quote_bg))
+                    .rounded(px(crate::theme::RADIUS_SM))
+                    .overflow_hidden()
                     .text_color(theme_color(theme.c.blockquote_fg))
             })
         }
@@ -324,17 +438,27 @@ fn block_element(
             ordered,
             start,
             items,
-        } => list_element(*ordered, *start, items, base_dir, theme, remote_images),
+        } => list_element(*ordered, *start, items, base_dir, theme, remote_images, scale),
         Block::TaskList { checked, items } => {
-            let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(8.0));
+            let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(6.0));
+            // Center the 16px checkbox within the first body line box.
+            let checkbox_offset = ((scale.body_line - 16.0) / 2.0).max(0.0);
             for (index, item) in items.iter().enumerate() {
-                let done = checked.get(index).copied().unwrap_or(false);
+                let marker = match checked.get(index).copied().flatten() {
+                    Some(done) => div()
+                        .mt(px(checkbox_offset))
+                        .child(task_checkbox(done, theme))
+                        .into_any_element(),
+                    // Mixed list: this item carried no [ ]/[x] marker.
+                    None => div().child("•").into_any_element(),
+                };
                 list = list.child(list_row(
-                    task_checkbox(done, theme).into_any_element(),
+                    marker,
                     item,
                     base_dir,
                     theme,
                     remote_images,
+                    scale,
                 ));
             }
             list.into_any_element()
@@ -347,27 +471,28 @@ fn block_element(
                 .rounded(px(8.0))
                 .overflow_hidden();
             if !header.is_empty() {
-                table = table.child(table_row(header, true, theme));
+                table = table.child(table_row(header, true, false, theme));
             }
-            for row in rows {
-                table = table.child(table_row(row, false, theme));
+            for (idx, row) in rows.iter().enumerate() {
+                let striped = idx % 2 == 1;
+                table = table.child(table_row(row, false, striped, theme));
             }
             table.into_any_element()
         }
         Block::CardGroup { columns, cards } => {
-            card_group_element(*columns, cards, base_dir, theme, remote_images)
+            card_group_element(*columns, cards, base_dir, theme, remote_images, scale)
         }
-        Block::Steps { items } => steps_element(items, base_dir, theme, remote_images),
+        Block::Steps { items } => steps_element(items, base_dir, theme, remote_images, scale),
         Block::ThematicBreak => div()
-            .my(px(24.0))
+            .my(px(28.0))
             .h(px(1.0))
             .bg(theme_color(theme.c.hr))
             .into_any_element(),
         Block::Html(source) => html::html_blocks(source)
-            .map(|blocks| nested_blocks(&blocks, base_dir, theme, remote_images, |content| content))
+            .map(|blocks| nested_blocks(&blocks, base_dir, theme, remote_images, scale, |content| content))
             .unwrap_or_else(|| inert_block("HTML", source, theme)),
         Block::Footnote { label, blocks } => {
-            nested_blocks(blocks, base_dir, theme, remote_images, |content| {
+            nested_blocks(blocks, base_dir, theme, remote_images, scale, |content| {
                 content
                     .mt(px(16.0))
                     .p(px(12.0))
@@ -395,12 +520,13 @@ fn card_group_element(
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
 ) -> AnyElement {
     let mut group = div().mb(px(22.0)).flex().flex_wrap().gap(px(12.0));
     for (index, card) in cards.iter().enumerate() {
         let mut body = div().mt(px(8.0));
         for block in &card.blocks {
-            body = body.child(block_element(block, base_dir, theme, remote_images));
+            body = body.child(block_element(block, base_dir, theme, remote_images, scale));
         }
         let mut header = div()
             .flex()
@@ -467,6 +593,7 @@ fn steps_element(
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
 ) -> AnyElement {
     let mut steps = div().mb(px(22.0)).flex().flex_col().gap(px(16.0));
     for (index, step) in items.iter().enumerate() {
@@ -479,7 +606,7 @@ fn steps_element(
                 .child(step.title.clone()),
         );
         for block in &step.blocks {
-            content = content.child(block_element(block, base_dir, theme, remote_images));
+            content = content.child(block_element(block, base_dir, theme, remote_images, scale));
         }
         steps = steps.child(
             div()
@@ -513,11 +640,12 @@ fn nested_blocks(
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
     style: impl FnOnce(gpui::Div) -> gpui::Div,
 ) -> AnyElement {
     let mut content = style(div());
     for block in blocks {
-        content = content.child(block_element(block, base_dir, theme, remote_images));
+        content = content.child(block_element(block, base_dir, theme, remote_images, scale));
     }
     content.into_any_element()
 }
@@ -529,8 +657,9 @@ fn list_element(
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
 ) -> AnyElement {
-    let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(8.0));
+    let mut list = div().mb(px(18.0)).flex().flex_col().gap(px(6.0));
     for (index, item) in items.iter().enumerate() {
         let marker = if ordered {
             div().child(format!("{}.", start + index as u64))
@@ -543,6 +672,7 @@ fn list_element(
             base_dir,
             theme,
             remote_images,
+            scale,
         ));
     }
     list.into_any_element()
@@ -582,29 +712,37 @@ fn list_row(
     base_dir: &Path,
     theme: &Theme,
     remote_images: &mut RemoteImageStore,
+    scale: &TypographyScale,
 ) -> AnyElement {
-    let mut content = div().flex_1();
+    // min_w_0 overrides the flex `min-width:auto` floor so long text wraps
+    // instead of pushing the row past the window edge.
+    let mut content = div().flex_1().min_w_0();
     for block in blocks {
-        content = content.child(block_element(block, base_dir, theme, remote_images));
+        content = content.child(block_element(block, base_dir, theme, remote_images, scale));
     }
     div()
         .flex()
-        .gap(px(10.0))
+        .gap(px(6.0))
         .child(
             div()
-                .w(px(24.0))
+                .w(px(26.0))
                 .flex_none()
-                .flex()
-                .items_center()
+                // Top-anchor, NOT center: multi-line items must keep the marker on their first line.
+                .items_start()
                 .justify_center()
-                .text_color(theme_color(theme.c.link))
+                .text_color(theme_color(theme.c.muted))
                 .child(marker),
         )
         .child(content)
         .into_any_element()
 }
 
-fn table_row(cells: &[Vec<crate::document::Inline>], header: bool, theme: &Theme) -> AnyElement {
+fn table_row(
+    cells: &[Vec<crate::document::Inline>],
+    header: bool,
+    striped: bool,
+    theme: &Theme,
+) -> AnyElement {
     let mut row = div()
         .flex()
         .border_b_1()
@@ -612,9 +750,19 @@ fn table_row(cells: &[Vec<crate::document::Inline>], header: bool, theme: &Theme
         .when(header, |row| {
             row.bg(theme_color(theme.c.table_header_bg))
                 .font_weight(FontWeight::SEMIBOLD)
+        })
+        .when(!header && striped, |row| {
+            row.bg(theme_color(theme.c.stripe_bg))
         });
     for cell in cells {
-        row = row.child(div().flex_1().p(px(10.0)).child(inline_text(cell, theme)));
+        row = row.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(12.0))
+                .py(px(9.0))
+                .child(inline_text(cell, theme)),
+        );
     }
     row.into_any_element()
 }
@@ -748,27 +896,26 @@ fn code_block_element(lang: Option<&str>, text: &str, theme: &Theme) -> AnyEleme
         .overflow_hidden()
         .child(
             div()
-                .px(px(12.0))
-                .py(px(6.0))
+                .px(px(16.0))
+                .pt(px(10.0))
+                .pb(px(0.0))
                 .flex()
                 .items_center()
-                .border_b_1()
-                .border_color(theme_color(theme.c.table_border))
-                .bg(theme_color(theme.c.surface))
                 .child(
                     div()
                         .font_family("Menlo")
                         .text_xs()
                         .text_color(theme_color(theme.c.muted))
-                        .child(lang.unwrap_or("text").to_string()),
+                        .child(lang.unwrap_or("text").to_uppercase()),
                 ),
         )
         .child(
             div()
-                .p(px(16.0))
+                .px(px(16.0))
+                .py(px(13.0))
                 .font_family("Menlo")
                 .text_size(px(13.0))
-                .line_height(px(20.0))
+                .line_height(px(22.0))
                 .text_color(theme_color(theme.c.code_fg))
                 .child(StyledText::new(code.to_owned()).with_highlights(highlights)),
         )

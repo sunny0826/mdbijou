@@ -11,9 +11,10 @@ use crate::theme::{self, Theme};
 use crate::toc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    actions, div, px, size, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Timer, Window, WindowAppearance, WindowBounds, WindowOptions,
+    actions, div, px, size, AppContext, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, Timer, Window, WindowAppearance,
+    WindowBounds, WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -21,7 +22,7 @@ use gpui_component::{
     scroll::{ScrollableElement, ScrollbarShow},
     switch::Switch,
     theme::Theme as ComponentTheme,
-    IconName, Root, TitleBar,
+    Icon, IconName, Root, TitleBar,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -37,6 +38,7 @@ actions!(
         ToggleToc,
         IncreasePreviewFont,
         DecreasePreviewFont,
+        CloseSettings,
     ]
 );
 
@@ -49,7 +51,14 @@ pub struct GpuiMdbijouApp {
     editor: Entity<InputState>,
     show_toc: bool,
     active_toc: Option<usize>,
+    /// Anchor of the window's focus path. Must stay tracked + focused in
+    /// preview mode, or keybinding dispatch loses its path entirely.
+    focus: FocusHandle,
     pending_open: Option<PathBuf>,
+    /// File-dialog results land here: rfd's sheet callbacks fire outside any
+    /// GPUI update, so the apply happens on the next render pass.
+    deferred_open: Option<PathBuf>,
+    deferred_save: Option<PathBuf>,
     feedback: Option<SharedString>,
     preview_scroll: ScrollHandle,
     remote_images: gpui_preview::RemoteImageStore,
@@ -99,11 +108,14 @@ impl GpuiMdbijouApp {
             view: cfg.default_view,
             show_toc: cfg.show_toc,
             active_toc: None,
+            focus: cx.focus_handle(),
             cfg,
             theme,
             document,
             editor,
             pending_open: None,
+            deferred_open: None,
+            deferred_save: None,
             feedback: None,
             preview_scroll: ScrollHandle::default(),
             remote_images: gpui_preview::RemoteImageStore::default(),
@@ -113,6 +125,7 @@ impl GpuiMdbijouApp {
         };
         app.apply_follow_system_theme(window);
         app.sync_component_theme(cx);
+        window.focus(&app.focus);
         window.set_window_title(&app.window_title());
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.cfg.follow_system_theme {
@@ -237,27 +250,54 @@ impl GpuiMdbijouApp {
         self.set_document(document, window, cx);
     }
 
-    fn open_via_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS)
-            .pick_file()
-        {
-            self.request_open(path, window, cx);
-        }
+    fn open_via_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // MUST stay async: a sync rfd dialog blocks inside this click-handler
+        // borrow and macOS event re-entry panics on the AppCell RefCell.
+        let dialog = rfd::AsyncFileDialog::new()
+            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS);
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    this.deferred_open = Some(path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.document.path.clone().or_else(|| {
-            rfd::FileDialog::new()
-                .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS)
-                .set_file_name(DEFAULT_DOCUMENT_NAME)
-                .save_file()
-        });
-        let Some(path) = path else {
-            self.feedback = Some("保存已取消".into());
-            cx.notify();
-            return;
-        };
+        match self.document.path.clone() {
+            Some(path) => self.persist_document(path, window, cx),
+            None => self.save_via_dialog(cx),
+        }
+        let _ = window;
+    }
+
+    fn save_via_dialog(&mut self, cx: &mut Context<Self>) {
+        let dialog = rfd::AsyncFileDialog::new()
+            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS)
+            .set_file_name(DEFAULT_DOCUMENT_NAME);
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.save_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    this.deferred_save = Some(path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn persist_document(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match config::atomic_write(&path, self.document.text.as_bytes()) {
             Ok(()) => {
                 self.document.path = Some(path);
@@ -268,7 +308,6 @@ impl GpuiMdbijouApp {
             }
             Err(error) => self.feedback = Some(format!("保存失败：{error}").into()),
         }
-        let _ = window;
         cx.notify();
     }
 
@@ -289,19 +328,22 @@ impl GpuiMdbijouApp {
         cx.notify();
     }
 
-    fn toggle_view(&mut self, cx: &mut Context<Self>) {
+    fn toggle_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.view == View::Edit {
             self.document.reparse();
             self.view = View::Preview;
         } else {
             self.view = View::Edit;
         }
+        // Preview mode has no focusable element; without re-seating focus on
+        // the tracked handle the focus path empties and every keybinding dies.
+        window.focus(&self.focus);
         cx.notify();
     }
 
-    fn set_preview(&mut self, preview: bool, cx: &mut Context<Self>) {
+    fn set_preview(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
         if preview != (self.view == View::Preview) {
-            self.toggle_view(cx);
+            self.toggle_view(window, cx);
         }
     }
 
@@ -312,7 +354,7 @@ impl GpuiMdbijouApp {
         // not try to read `app` re-entrantly.
         let cfg = self.cfg.clone();
         let theme = self.theme.clone();
-        let bounds = Bounds::centered(None, size(px(640.0), px(740.0)), cx);
+        let bounds = Bounds::centered(None, size(px(660.0), px(740.0)), cx);
         if let Err(error) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -413,14 +455,6 @@ impl GpuiMdbijouApp {
         let next = FONTS[(index + 1) % FONTS.len()];
         self.cfg.font_family = next.0.into();
         self.feedback = Some(format!("正文字体：{}", next.1).into());
-        config::save(&self.cfg);
-        cx.notify();
-    }
-
-    fn toggle_follow_system_theme(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.cfg.follow_system_theme = !self.cfg.follow_system_theme;
-        self.apply_follow_system_theme(window);
-        self.sync_component_theme(cx);
         config::save(&self.cfg);
         cx.notify();
     }
@@ -565,8 +599,8 @@ impl GpuiMdbijouApp {
                                             "编辑",
                                             self.view == View::Edit,
                                             &self.theme,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.set_preview(false, cx)
+                                            cx.listener(|this, _, window, cx| {
+                                                this.set_preview(false, window, cx)
                                             }),
                                         ))
                                         .child(view_segment(
@@ -574,8 +608,8 @@ impl GpuiMdbijouApp {
                                             "预览",
                                             self.view == View::Preview,
                                             &self.theme,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.set_preview(true, cx)
+                                            cx.listener(|this, _, window, cx| {
+                                                this.set_preview(true, window, cx)
                                             }),
                                         )),
                                 ),
@@ -716,6 +750,7 @@ struct SettingsWindow {
     app: Entity<GpuiMdbijouApp>,
     cfg: Config,
     theme: Theme,
+    focus: FocusHandle,
     _subscription: Subscription,
 }
 
@@ -731,60 +766,272 @@ impl SettingsWindow {
             app,
             cfg,
             theme,
+            focus: cx.focus_handle(),
             _subscription: subscription,
         }
     }
 }
 
+// ── SettingsWindow helpers ────────────────────────────────────────────
+
+fn font_display_name(id: &str) -> &'static str {
+    match id {
+        "pingfang" => "苹方",
+        "hiragino" => "冬青黑体",
+        "songti" => "宋体",
+        "heiti" => "黑体",
+        _ => "系统默认",
+    }
+}
+
+fn section_label(text: &'static str, theme: &Theme) -> impl IntoElement {
+    div()
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme_color(theme.c.muted))
+        .child(text)
+}
+
+fn settings_card(theme: &Theme) -> gpui::Div {
+    // macOS inset-group look: quiet fill, no border, generous corner radius.
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .bg(theme_color(theme.c.surface))
+        .rounded(px(10.0))
+        .px(px(14.0))
+        .py(px(4.0))
+}
+
+fn settings_divider(theme: &Theme) -> impl IntoElement {
+    // Inset to align with row text, like System Settings groups.
+    div()
+        .h(px(1.0))
+        .w_full()
+        .bg(theme_color(theme.c.table_border))
+        .opacity(0.6)
+}
+
+fn setting_row(
+    label: &'static str,
+    subtitle: Option<&'static str>,
+    control: impl IntoElement,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .py(px(9.0))
+        .gap(px(16.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme_color(theme.c.foreground))
+                        .child(label),
+                )
+                .when_some(subtitle, |this, sub| {
+                    this.child(
+                        div()
+                            .mt(px(1.0))
+                            .text_size(px(11.0))
+                            .text_color(theme_color(theme.c.muted))
+                            .child(sub),
+                    )
+                }),
+        )
+        .child(div().flex_none().child(control))
+}
+
+fn stepper_control(
+    value_text: String,
+    dec_id: impl Into<gpui::ElementId>,
+    inc_id: impl Into<gpui::ElementId>,
+    on_dec: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_inc: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            Button::new(dec_id)
+                .compact()
+                .label("−")
+                .on_click(on_dec),
+        )
+        .child(
+            div()
+                .min_w(px(56.0))
+                .text_center()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(value_text),
+        )
+        .child(
+            Button::new(inc_id)
+                .compact()
+                .label("+")
+                .on_click(on_inc),
+        )
+}
+
 impl Render for SettingsWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus);
+        }
         let cfg = self.cfg.clone();
         let theme = self.theme.clone();
-        let c = &theme.c;
 
-        let mut themes = div().mt(px(12.0)).flex().flex_wrap().gap(px(8.0));
-        for (index, (id, name, _)) in theme::builtin_ids().into_iter().enumerate() {
-            let app = self.app.clone();
-            themes = themes.child(Button::new(("theme", index)).label(name).on_click(
-                move |_, _, cx| {
-                    app.update(cx, |this, cx| this.switch_theme(id, cx));
-                },
-            ));
-        }
-
+        // Clones for every handler — preserve exact existing semantics.
+        let font_family = self.app.clone();
         let preview_down = self.app.clone();
         let preview_up = self.app.clone();
-        let editor_down = self.app.clone();
-        let editor_up = self.app.clone();
-        let font_family = self.app.clone();
-        let width_down = self.app.clone();
-        let width_up = self.app.clone();
         let line_down = self.app.clone();
         let line_up = self.app.clone();
+        let width_down = self.app.clone();
+        let width_up = self.app.clone();
+        let editor_down = self.app.clone();
+        let editor_up = self.app.clone();
         let auto_save = self.app.clone();
         let status_bar = self.app.clone();
         let line_numbers = self.app.clone();
         let highlight = self.app.clone();
         let tab_size = self.app.clone();
-        let follow_system = self.app.clone();
         let install_cli = self.app.clone();
 
+        // ── Theme swatch tiles ──────────────────────────────────────────
+        let mut theme_grid = div().flex().gap(px(8.0));
+        for (index, (id, name, _)) in theme::builtin_ids().into_iter().enumerate() {
+            let is_selected = cfg.theme == id;
+            let swatch_theme = theme::builtin(id).expect("builtin theme exists");
+            let app = self.app.clone();
+            // Miniature document preview: heading / body / accent.
+            let preview = div()
+                .w_full()
+                .h(px(40.0))
+                .rounded(px(6.0))
+                .bg(theme_color(swatch_theme.c.background))
+                .border_1()
+                .border_color(theme_color(swatch_theme.c.table_border))
+                .px(px(8.0))
+                .py(px(6.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(40.0))
+                        .h(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(theme_color(swatch_theme.c.heading)),
+                )
+                .child(
+                    div()
+                        .w(px(60.0))
+                        .h(px(3.0))
+                        .rounded(px(1.5))
+                        .bg(theme_color(swatch_theme.c.muted)),
+                )
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(3.0))
+                        .rounded(px(1.5))
+                        .bg(theme_color(swatch_theme.c.link)),
+                );
+
+            let tile = div()
+                .id(("theme-swatch", index))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .p(px(5.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .when(is_selected, |this| {
+                    this.border_2()
+                        .border_color(theme_color(theme.c.link))
+                        .bg(theme_color(theme.c.surface))
+                })
+                .when(!is_selected, |this| {
+                    this.border_1()
+                        .border_color(theme_color(theme.c.table_border))
+                        .hover(|s| s.bg(theme_color(theme.c.surface_hover)))
+                })
+                .child(preview)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme_color(if is_selected {
+                                    theme.c.foreground
+                                } else {
+                                    theme.c.muted
+                                }))
+                                .child(name),
+                        )
+                        .when(is_selected, |this| {
+                            this.child(
+                                Icon::new(IconName::Check)
+                                    .size(px(10.0))
+                                    .text_color(theme_color(theme.c.link)),
+                            )
+                        }),
+                )
+                .on_click(move |_, _, cx| {
+                    app.update(cx, |this, cx| this.switch_theme(id, cx));
+                });
+
+            theme_grid = theme_grid.child(tile);
+        }
+
+        // ── Stepper values ─────────────────────────────────────────────
+        let preview_font_text = format!("{} pt", cfg.font_size.round() as i32);
+        let editor_font_text = format!("{} pt", cfg.editor_font_size.round() as i32);
+        let line_height_text = format!("{:.1}", cfg.line_height);
+        let content_width_text = format!("{} px", cfg.content_width.round() as i32);
+        let current_font_name = font_display_name(&cfg.font_family);
+
+        // ── Layout ─────────────────────────────────────────────────────
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme_color(c.background))
-            .text_color(theme_color(c.foreground))
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &CloseSettings, window, _| {
+                window.remove_window();
+            }))
+            .bg(theme_color(theme.c.background))
+            .text_color(theme_color(theme.c.foreground))
             .child(
                 div()
-                    .h(px(52.0))
-                    .px(px(20.0))
+                    .h(px(40.0))
                     .flex()
                     .items_center()
-                    .border_b_1()
-                    .border_color(theme_color(c.table_border))
-                    .bg(theme_color(c.surface))
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("设置")),
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("设置"),
+                    ),
             )
             .child(
                 div()
@@ -797,208 +1044,281 @@ impl Render for SettingsWindow {
                             .w_full()
                             .max_w(px(560.0))
                             .mx_auto()
-                            .p(px(28.0))
-                            .child(div().text_color(theme_color(c.muted)).child(format!(
-                                "当前主题：{} · 正文 {} pt · 编辑器 {} pt",
-                                cfg.theme, cfg.font_size, cfg.editor_font_size
-                            )))
+                            .px(px(24.0))
+                            .pt(px(16.0))
+                            .pb(px(28.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.0))
+                            // ── Section: 外观 ──
                             .child(
                                 div()
-                                    .mt(px(28.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("主题"),
-                            )
-                            .child(themes)
-                            .child(
-                                div()
-                                    .mt(px(28.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("排版"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(8.0))
-                                    .child(
-                                        Button::new("preview-font-down").label("正文 A−").on_click(
-                                            move |_, _, cx| {
-                                                preview_down.update(cx, |this, cx| {
-                                                    this.adjust_preview_font(-1.0, cx)
-                                                });
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("preview-font-up").label("正文 A+").on_click(
-                                            move |_, _, cx| {
-                                                preview_up.update(cx, |this, cx| {
-                                                    this.adjust_preview_font(1.0, cx)
-                                                });
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("editor-font-down").label("编辑 A−").on_click(
-                                            move |_, _, cx| {
-                                                editor_down.update(cx, |this, cx| {
-                                                    this.adjust_editor_font(-1.0, cx)
-                                                });
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("editor-font-up").label("编辑 A+").on_click(
-                                            move |_, _, cx| {
-                                                editor_up.update(cx, |this, cx| {
-                                                    this.adjust_editor_font(1.0, cx)
-                                                });
-                                            },
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(8.0))
-                                    .child(
-                                        Button::new("font-family").label("切换正文字体").on_click(
-                                            move |_, _, cx| {
-                                                font_family.update(cx, |this, cx| {
-                                                    this.cycle_preview_font(cx)
-                                                });
-                                            },
-                                        ),
-                                    )
-                                    .child(Button::new("width-down").label("列宽 −").on_click(
-                                        move |_, _, cx| {
-                                            width_down.update(cx, |this, cx| {
-                                                this.adjust_content_width(-60.0, cx)
-                                            });
-                                        },
-                                    ))
-                                    .child(Button::new("width-up").label("列宽 +").on_click(
-                                        move |_, _, cx| {
-                                            width_up.update(cx, |this, cx| {
-                                                this.adjust_content_width(60.0, cx)
-                                            });
-                                        },
-                                    ))
-                                    .child(Button::new("line-down").label("行距 −").on_click(
-                                        move |_, _, cx| {
-                                            line_down.update(cx, |this, cx| {
-                                                this.adjust_line_height(-0.1, cx)
-                                            });
-                                        },
-                                    ))
-                                    .child(Button::new("line-up").label("行距 +").on_click(
-                                        move |_, _, cx| {
-                                            line_up.update(cx, |this, cx| {
-                                                this.adjust_line_height(0.1, cx)
-                                            });
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(28.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("文档行为"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(12.0))
-                                    .child(
-                                        Switch::new("auto-save")
-                                            .checked(cfg.auto_save)
-                                            .label("自动保存")
-                                            .on_click(move |value, _, cx| {
-                                                auto_save.update(cx, |this, cx| {
-                                                    this.cfg.auto_save = *value;
-                                                    config::save(&this.cfg);
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    )
-                                    .child(
-                                        Switch::new("status-bar")
-                                            .checked(cfg.show_status_bar)
-                                            .label("显示状态栏")
-                                            .on_click(move |value, _, cx| {
-                                                status_bar.update(cx, |this, cx| {
-                                                    this.cfg.show_status_bar = *value;
-                                                    config::save(&this.cfg);
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    )
-                                    .child(
-                                        Switch::new("line-numbers")
-                                            .checked(cfg.show_line_numbers)
-                                            .label("显示行号")
-                                            .on_click(move |value, window, cx| {
-                                                line_numbers.update(cx, |this, cx| {
-                                                    this.cfg.show_line_numbers = *value;
-                                                    this.editor.update(cx, |editor, cx| {
-                                                        editor.set_line_number(*value, window, cx);
-                                                    });
-                                                    config::save(&this.cfg);
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    )
-                                    .child(
-                                        Switch::new("highlight")
-                                            .checked(cfg.highlight)
-                                            .label("语法高亮")
-                                            .on_click(move |value, _, cx| {
-                                                highlight.update(cx, |this, cx| {
-                                                    if this.cfg.highlight != *value {
-                                                        this.toggle_highlight(cx);
-                                                    }
-                                                });
-                                            }),
-                                    )
-                                    .child(
-                                        Switch::new("follow-system-theme")
-                                            .checked(cfg.follow_system_theme)
-                                            .label("跟随系统主题")
-                                            .on_click(move |value, window, cx| {
-                                                follow_system.update(cx, |this, cx| {
-                                                    if this.cfg.follow_system_theme != *value {
-                                                        this.toggle_follow_system_theme(window, cx);
-                                                    }
-                                                });
-                                            }),
-                                    ),
+                                    .gap(px(8.0))
+                                    .child(section_label("外观", &theme))
+                                    .child(settings_card(&theme).child(theme_grid)),
                             )
+                            // ── Section: 阅读 ──
                             .child(
                                 div()
-                                    .mt(px(16.0))
                                     .flex()
+                                    .flex_col()
                                     .gap(px(8.0))
+                                    .child(section_label("阅读", &theme))
                                     .child(
-                                        Button::new("tab-size")
-                                            .label(format!("Tab：{}", cfg.tab_size))
-                                            .on_click(move |_, _, cx| {
-                                                tab_size
-                                                    .update(cx, |this, cx| this.cycle_tab_size(cx));
-                                            }),
-                                    )
+                                        settings_card(&theme)
+                                            .child(setting_row(
+                                                "正文字体",
+                                                Some(current_font_name),
+                                                Button::new("switch-font-family")
+                                                    .label(current_font_name)
+                                                    .on_click(move |_, _, cx| {
+                                                        font_family.update(cx, |this, cx| {
+                                                            this.cycle_preview_font(cx)
+                                                        });
+                                                    }),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "正文字号",
+                                                None,
+                                                stepper_control(
+                                                    preview_font_text,
+                                                    "preview-font-down",
+                                                    "preview-font-up",
+                                                    move |_, _, cx| {
+                                                        preview_down.update(cx, |this, cx| {
+                                                            this.adjust_preview_font(-1.0, cx)
+                                                        });
+                                                    },
+                                                    move |_, _, cx| {
+                                                        preview_up.update(cx, |this, cx| {
+                                                            this.adjust_preview_font(1.0, cx)
+                                                        });
+                                                    },
+                                                ),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "行距",
+                                                None,
+                                                stepper_control(
+                                                    line_height_text,
+                                                    "line-height-down",
+                                                    "line-height-up",
+                                                    move |_, _, cx| {
+                                                        line_down.update(cx, |this, cx| {
+                                                            this.adjust_line_height(-0.1, cx)
+                                                        });
+                                                    },
+                                                    move |_, _, cx| {
+                                                        line_up.update(cx, |this, cx| {
+                                                            this.adjust_line_height(0.1, cx)
+                                                        });
+                                                    },
+                                                ),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "列宽",
+                                                None,
+                                                stepper_control(
+                                                    content_width_text,
+                                                    "content-width-down",
+                                                    "content-width-up",
+                                                    move |_, _, cx| {
+                                                        width_down.update(cx, |this, cx| {
+                                                            this.adjust_content_width(-60.0, cx)
+                                                        });
+                                                    },
+                                                    move |_, _, cx| {
+                                                        width_up.update(cx, |this, cx| {
+                                                            this.adjust_content_width(60.0, cx)
+                                                        });
+                                                    },
+                                                ),
+                                                &theme,
+                                            )),
+                                    ),
+                            )
+                            // ── Section: 编辑器 ──
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(section_label("编辑器", &theme))
                                     .child(
-                                        Button::new("install-cli")
-                                            .icon(IconName::SquareTerminal)
-                                            .label("安装 mdb 命令")
-                                            .on_click(move |_, _, cx| {
-                                                install_cli
-                                                    .update(cx, |this, cx| this.install_cli(cx));
-                                            }),
+                                        settings_card(&theme)
+                                            .child(setting_row(
+                                                "语法高亮",
+                                                Some("Markdown 源码着色"),
+                                                Switch::new("highlight")
+                                                    .checked(cfg.highlight)
+                                                    .on_click(move |value, _, cx| {
+                                                        highlight.update(cx, |this, cx| {
+                                                            if this.cfg.highlight != *value {
+                                                                this.toggle_highlight(cx);
+                                                            }
+                                                        });
+                                                    }),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "显示行号",
+                                                None,
+                                                Switch::new("line-numbers")
+                                                    .checked(cfg.show_line_numbers)
+                                                    .on_click(move |value, window, cx| {
+                                                        line_numbers.update(cx, |this, cx| {
+                                                            this.cfg.show_line_numbers = *value;
+                                                            this.editor.update(cx, |editor, cx| {
+                                                                editor.set_line_number(
+                                                                    *value, window, cx,
+                                                                );
+                                                            });
+                                                            config::save(&this.cfg);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "Tab 宽度",
+                                                None,
+                                                Button::new("tab-size")
+                                                    .label(format!("Tab：{}", cfg.tab_size))
+                                                    .on_click(move |_, _, cx| {
+                                                        tab_size.update(cx, |this, cx| {
+                                                            this.cycle_tab_size(cx)
+                                                        });
+                                                    }),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "编辑器字号",
+                                                None,
+                                                stepper_control(
+                                                    editor_font_text,
+                                                    "editor-font-down",
+                                                    "editor-font-up",
+                                                    move |_, _, cx| {
+                                                        editor_down.update(cx, |this, cx| {
+                                                            this.adjust_editor_font(-1.0, cx)
+                                                        });
+                                                    },
+                                                    move |_, _, cx| {
+                                                        editor_up.update(cx, |this, cx| {
+                                                            this.adjust_editor_font(1.0, cx)
+                                                        });
+                                                    },
+                                                ),
+                                                &theme,
+                                            )),
+                                    ),
+                            )
+                            // ── Section: 文档 ──
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(section_label("文档", &theme))
+                                    .child(
+                                        settings_card(&theme)
+                                            .child(setting_row(
+                                                "自动保存",
+                                                Some("编辑时自动写回磁盘"),
+                                                Switch::new("auto-save")
+                                                    .checked(cfg.auto_save)
+                                                    .on_click(move |value, _, cx| {
+                                                        auto_save.update(cx, |this, cx| {
+                                                            this.cfg.auto_save = *value;
+                                                            config::save(&this.cfg);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                                &theme,
+                                            ))
+                                            .child(settings_divider(&theme))
+                                            .child(setting_row(
+                                                "状态栏",
+                                                None,
+                                                Switch::new("status-bar")
+                                                    .checked(cfg.show_status_bar)
+                                                    .on_click(move |value, _, cx| {
+                                                        status_bar.update(cx, |this, cx| {
+                                                            this.cfg.show_status_bar = *value;
+                                                            config::save(&this.cfg);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                                &theme,
+                                            )),
+                                    ),
+                            )
+                            // ── Section: 命令行工具 ──
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(section_label("命令行工具", &theme))
+                                    .child(
+                                        settings_card(&theme)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap(px(16.0))
+                                                    .py(px(4.0))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
+                                                                    .text_color(theme_color(
+                                                                        theme.c.foreground,
+                                                                    ))
+                                                                    .child("安装 mdb 命令"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(theme_color(
+                                                                        theme.c.muted,
+                                                                    ))
+                                                                    .child(
+                                                                        "安装 mdb 命令到 PATH，可在终端打开 Markdown 文件",
+                                                                    ),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        Button::new("install-cli")
+                                                            .icon(IconName::SquareTerminal)
+                                                            .label("安装 mdb 命令")
+                                                            .on_click(move |_, _, cx| {
+                                                                install_cli.update(cx, |this, cx| {
+                                                                    this.install_cli(cx)
+                                                                });
+                                                            }),
+                                                    ),
+                                            ),
                                     ),
                             ),
                     ),
@@ -1010,6 +1330,14 @@ impl Render for GpuiMdbijouApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         while let Ok(path) = self.open_rx.try_recv() {
             self.request_open(path, window, cx);
+        }
+        // File-dialog sheets resolve outside GPUI updates; apply them here
+        // where a &mut Window is available again.
+        if let Some(path) = self.deferred_open.take() {
+            self.request_open(path, window, cx);
+        }
+        if let Some(path) = self.deferred_save.take() {
+            self.persist_document(path, window, cx);
         }
         let body = if self.view == View::Preview {
             div()
@@ -1056,6 +1384,9 @@ impl Render for GpuiMdbijouApp {
             .flex()
             .flex_col()
             .min_h_0()
+            // Keeps the view on the focus path so bound actions dispatch even
+            // in preview mode, where no other element is focusable.
+            .track_focus(&self.focus)
             .bg(theme_color(self.theme.c.background))
             .text_color(theme_color(self.theme.c.foreground))
             .child(
@@ -1083,7 +1414,9 @@ impl Render for GpuiMdbijouApp {
             content = content.child(confirmation);
         }
         content
-            .on_action(cx.listener(|this, _: &ToggleView, _, cx| this.toggle_view(cx)))
+            .on_action(cx.listener(
+                |this, _: &ToggleView, window, cx| this.toggle_view(window, cx),
+            ))
             .on_action(cx.listener(|this, _: &SaveDocument, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &ReloadDocument, window, cx| this.reload(window, cx)))
             .on_action(
@@ -1214,4 +1547,75 @@ fn theme_color(color: crate::color::Color) -> gpui::Hsla {
             | color.a() as u32,
     )
     .into()
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use gpui::{TestAppContext, WindowHandle};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Builds the real window (Root + GpuiMdbijouApp) inside the test
+    /// renderer and returns the handle pair needed for assertions.
+    fn spawn_app(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<GpuiMdbijouApp>) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::gpui_runtime::bind_app_keys(cx);
+        });
+        let document = Document::new("# Hello\n\n## Section A\n\nbody".to_string());
+        let cfg = Config::default();
+        let (_open_tx, open_rx) = std::sync::mpsc::channel();
+        let slot: Rc<RefCell<Option<Entity<GpuiMdbijouApp>>>> = Rc::default();
+        let slot_for_builder = slot.clone();
+        let window = cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| {
+                GpuiMdbijouApp::new(document.clone(), cfg.clone(), open_rx, window, cx)
+            });
+            *slot_for_builder.borrow_mut() = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = slot.borrow().as_ref().expect("view built").clone();
+        (window, view)
+    }
+
+    #[gpui::test]
+    async fn cmd_t_toggles_toc_in_preview_mode(cx: &mut TestAppContext) {
+        let (window, view) = spawn_app(cx);
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(!view.show_toc, "precondition: TOC starts hidden");
+            assert_eq!(view.view, View::Preview, "precondition: preview mode");
+        });
+
+        cx.simulate_keystrokes(window.into(), "cmd-t");
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(
+                view.show_toc,
+                "⌘T must toggle the TOC panel; if this fails the focus \
+                 path is empty and every keybinding is dead again"
+            );
+        });
+
+        cx.simulate_keystrokes(window.into(), "cmd-t");
+        cx.run_until_parked();
+        view.update(cx, |view, _| assert!(!view.show_toc));
+    }
+
+    #[gpui::test]
+    async fn cmd_comma_opens_the_settings_window(cx: &mut TestAppContext) {
+        let (window, _view) = spawn_app(cx);
+        cx.run_until_parked();
+        let before = cx.update(|cx| cx.windows().len());
+
+        cx.simulate_keystrokes(window.into(), "cmd-,");
+        cx.run_until_parked();
+        let after = cx.update(|cx| cx.windows().len());
+        assert_eq!(
+            after,
+            before + 1,
+            "⌘, must open the settings window (action dispatch regression)"
+        );
+    }
 }
