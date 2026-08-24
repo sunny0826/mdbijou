@@ -51,7 +51,8 @@ pub enum Block {
         items: Vec<Vec<Block>>,
     },
     TaskList {
-        checked: Vec<bool>,
+        /// Per-item state; `None` = item had no `[ ]`/`[x]` marker (plain bullet).
+        checked: Vec<Option<bool>>,
         items: Vec<Vec<Block>>,
     },
     Table {
@@ -331,7 +332,12 @@ fn parse_markdown(text: &str) -> Vec<Block> {
             Event::HardBreak => sink_inline(&mut stack, &mut out, Inline::HardBreak),
             Event::Rule => emit_block(&mut stack, &mut out, Block::ThematicBreak),
             Event::TaskListMarker(checked) => {
-                if let Some(Ctx::Item { task, .. }) = stack.last_mut() {
+                // Loose lists wrap item content in a Paragraph frame; find
+                // the enclosing Item instead of assuming it tops the stack.
+                if let Some(task) = stack.iter_mut().rev().find_map(|c| match c {
+                    Ctx::Item { task, .. } => Some(task),
+                    _ => None,
+                }) {
                     *task = Some(checked);
                 }
             }
@@ -505,8 +511,8 @@ fn end_tag(stack: &mut Vec<Ctx>, out: &mut Vec<Block>, end: TagEnd) {
                 // A trailing item may still hold content if something went wrong.
                 let is_task = items.iter().any(|(t, _)| t.is_some());
                 if is_task {
-                    let checked: Vec<bool> =
-                        items.iter().map(|(t, _)| t.unwrap_or(false)).collect();
+                    let checked: Vec<Option<bool>> =
+                        items.iter().map(|(t, _)| *t).collect();
                     let blocks: Vec<Vec<Block>> = items.into_iter().map(|(_, b)| b).collect();
                     emit_block(
                         stack,
@@ -1089,7 +1095,7 @@ mod tests {
         let Block::TaskList { checked, items } = &blocks[0] else {
             panic!("expected task list")
         };
-        assert_eq!(checked, &vec![true, false]);
+        assert_eq!(checked, &vec![Some(true), Some(false)]);
         assert_eq!(para_text(&items[0]), vec!["已完成".to_string()]);
         assert_eq!(para_text(&items[1]), vec!["待办".to_string()]);
     }
@@ -1247,5 +1253,18 @@ mod tests {
     fn thematic_break_parsed() {
         let blocks = parse_md("---\n");
         assert!(blocks.iter().any(|b| matches!(b, Block::ThematicBreak)));
+    }
+
+    #[test]
+    fn task_list_after_nested_list_stays_tasklist() {
+        let md = "- First item\n- Second item\n    1. Nested ordered\n    2. Continue\n- Third item long text\n\n- [x] Completed task\n- [ ] Pending task\n";
+        // The blank line keeps this ONE loose list; markers must survive the
+        // Paragraph frame and unmarked items stay None (bullets).
+        let blocks = parse_md(md);
+        let Some(Block::TaskList { checked, items }) = blocks.last() else {
+            panic!("expected tasklist");
+        };
+        assert_eq!(checked, &vec![None, None, None, Some(true), Some(false)]);
+        assert_eq!(items.len(), 5);
     }
 }

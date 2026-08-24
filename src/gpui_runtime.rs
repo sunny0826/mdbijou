@@ -71,6 +71,43 @@ impl gpui_http_client::HttpClient for RemoteImageHttpClient {
     }
 }
 
+/// Embedded app artwork so the Dock icon is correct in dev runs (`just`),
+/// where no .app bundle exists to supply one.
+#[cfg(target_os = "macos")]
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/mdbijou-icon-1024.png");
+
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(APP_ICON_PNG);
+    let Some(image) = NSImage::initWithData(mtm.alloc(), &data) else {
+        return;
+    };
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+}
+
+/// Keystroke map for the whole app. Registered once at startup and again in
+/// tests, which bypass `run()`.
+pub(crate) fn bind_app_keys(cx: &mut gpui::App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-e", crate::gpui_app::ToggleView, None),
+        KeyBinding::new("cmd-s", crate::gpui_app::SaveDocument, None),
+        KeyBinding::new("cmd-r", crate::gpui_app::ReloadDocument, None),
+        KeyBinding::new("cmd-o", crate::gpui_app::OpenDocument, None),
+        KeyBinding::new("cmd-,", crate::gpui_app::ToggleSettings, None),
+        KeyBinding::new("escape", crate::gpui_app::CloseSettings, None),
+        KeyBinding::new("cmd-t", crate::gpui_app::ToggleToc, None),
+        KeyBinding::new("cmd-+", crate::gpui_app::IncreasePreviewFont, None),
+        KeyBinding::new("cmd--", crate::gpui_app::DecreasePreviewFont, None),
+    ]);
+}
+
 pub fn run() {
     let options = match cli::parse(std::env::args().skip(1)) {
         Ok(cli::CliAction::Help) => return print_help(),
@@ -117,17 +154,10 @@ pub fn run() {
         }
     });
     application.run(move |cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        set_dock_icon();
         gpui_component::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-e", crate::gpui_app::ToggleView, None),
-            KeyBinding::new("cmd-s", crate::gpui_app::SaveDocument, None),
-            KeyBinding::new("cmd-r", crate::gpui_app::ReloadDocument, None),
-            KeyBinding::new("cmd-o", crate::gpui_app::OpenDocument, None),
-            KeyBinding::new("cmd-,", crate::gpui_app::ToggleSettings, None),
-            KeyBinding::new("cmd-t", crate::gpui_app::ToggleToc, None),
-            KeyBinding::new("cmd-+", crate::gpui_app::IncreasePreviewFont, None),
-            KeyBinding::new("cmd--", crate::gpui_app::DecreasePreviewFont, None),
-        ]);
+        bind_app_keys(cx);
         let bounds = Bounds::centered(None, size(px(1024.0), px(760.0)), cx);
         cx.open_window(
             WindowOptions {
