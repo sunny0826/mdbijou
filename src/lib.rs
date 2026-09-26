@@ -10,6 +10,7 @@ pub mod config;
 pub mod document;
 pub mod file_types;
 pub mod gpui_app;
+mod gpui_lifecycle;
 pub mod gpui_preview;
 pub mod gpui_runtime;
 pub mod html;
