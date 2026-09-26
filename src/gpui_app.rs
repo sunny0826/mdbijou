@@ -11,10 +11,9 @@ use crate::theme::{self, Theme};
 use crate::toc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    actions, div, px, size, AppContext, Bounds, Context, Entity, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Timer, Window, WindowAppearance,
-    WindowBounds, WindowOptions,
+    actions, div, px, size, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, Timer, Window, WindowAppearance, WindowBounds, WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -63,7 +62,6 @@ pub struct GpuiMdbijouApp {
     preview_scroll: ScrollHandle,
     remote_images: gpui_preview::RemoteImageStore,
     remote_image_poll_task: Option<Task<()>>,
-    open_rx: std::sync::mpsc::Receiver<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -71,7 +69,6 @@ impl GpuiMdbijouApp {
     pub fn new(
         document: Document,
         cfg: Config,
-        open_rx: std::sync::mpsc::Receiver<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -93,7 +90,13 @@ impl GpuiMdbijouApp {
             window,
             |this, editor, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.document.text = editor.read(cx).value().to_string();
+                    let text = editor.read(cx).value().to_string();
+                    // Loading a document also emits Change. Its source is
+                    // already synchronized by set_document, so it is not an edit.
+                    if this.document.text == text {
+                        return;
+                    }
+                    this.document.text = text;
                     this.document.dirty = true;
                     this.feedback = None;
                     this.auto_save(window, cx);
@@ -120,7 +123,6 @@ impl GpuiMdbijouApp {
             preview_scroll: ScrollHandle::default(),
             remote_images: gpui_preview::RemoteImageStore::default(),
             remote_image_poll_task: None,
-            open_rx,
             _subscriptions: subscriptions,
         };
         app.apply_follow_system_theme(window);
@@ -233,7 +235,12 @@ impl GpuiMdbijouApp {
         cx.notify();
     }
 
-    fn request_open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_open(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.document.dirty {
             self.pending_open = Some(path);
             cx.notify();
@@ -253,8 +260,8 @@ impl GpuiMdbijouApp {
     fn open_via_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         // MUST stay async: a sync rfd dialog blocks inside this click-handler
         // borrow and macOS event re-entry panics on the AppCell RefCell.
-        let dialog = rfd::AsyncFileDialog::new()
-            .add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS);
+        let dialog =
+            rfd::AsyncFileDialog::new().add_filter(DOCUMENT_FILTER_NAME, DOCUMENT_EXTENSIONS);
         cx.spawn(async move |this, cx| {
             let Some(handle) = dialog.pick_file().await else {
                 return;
@@ -861,12 +868,7 @@ fn stepper_control(
         .flex()
         .items_center()
         .gap(px(2.0))
-        .child(
-            Button::new(dec_id)
-                .compact()
-                .label("−")
-                .on_click(on_dec),
-        )
+        .child(Button::new(dec_id).compact().label("−").on_click(on_dec))
         .child(
             div()
                 .min_w(px(56.0))
@@ -875,12 +877,7 @@ fn stepper_control(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(value_text),
         )
-        .child(
-            Button::new(inc_id)
-                .compact()
-                .label("+")
-                .on_click(on_inc),
-        )
+        .child(Button::new(inc_id).compact().label("+").on_click(on_inc))
 }
 
 impl Render for SettingsWindow {
@@ -1328,9 +1325,6 @@ impl Render for SettingsWindow {
 
 impl Render for GpuiMdbijouApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        while let Ok(path) = self.open_rx.try_recv() {
-            self.request_open(path, window, cx);
-        }
         // File-dialog sheets resolve outside GPUI updates; apply them here
         // where a &mut Window is available again.
         if let Some(path) = self.deferred_open.take() {
@@ -1414,9 +1408,7 @@ impl Render for GpuiMdbijouApp {
             content = content.child(confirmation);
         }
         content
-            .on_action(cx.listener(
-                |this, _: &ToggleView, window, cx| this.toggle_view(window, cx),
-            ))
+            .on_action(cx.listener(|this, _: &ToggleView, window, cx| this.toggle_view(window, cx)))
             .on_action(cx.listener(|this, _: &SaveDocument, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &ReloadDocument, window, cx| this.reload(window, cx)))
             .on_action(
@@ -1565,13 +1557,10 @@ mod shortcut_tests {
         });
         let document = Document::new("# Hello\n\n## Section A\n\nbody".to_string());
         let cfg = Config::default();
-        let (_open_tx, open_rx) = std::sync::mpsc::channel();
         let slot: Rc<RefCell<Option<Entity<GpuiMdbijouApp>>>> = Rc::default();
         let slot_for_builder = slot.clone();
         let window = cx.add_window(move |window, cx| {
-            let view = cx.new(|cx| {
-                GpuiMdbijouApp::new(document.clone(), cfg.clone(), open_rx, window, cx)
-            });
+            let view = cx.new(|cx| GpuiMdbijouApp::new(document.clone(), cfg.clone(), window, cx));
             *slot_for_builder.borrow_mut() = Some(view.clone());
             Root::new(view, window, cx)
         });
@@ -1619,3 +1608,6 @@ mod shortcut_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

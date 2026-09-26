@@ -1,6 +1,13 @@
 # Changelog
 
-## v0.0.4 (unreleased)
+## v0.0.5 (unreleased)
+
+### Fixed
+
+- macOS: clicking the Dock icon recreates the document window after it is closed; opening a file from Finder also recreates the window and retains the unsaved-changes guard when a document is already open.
+- macOS: loading a document no longer marks it as an unsaved edit merely because the editor receives its initial text.
+
+## v0.0.4
 
 ### Added
 

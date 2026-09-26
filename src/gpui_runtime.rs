@@ -1,10 +1,13 @@
 //! Primary GPUI process entry point.
 
-use crate::{assets::Assets, cli, config, document::Document, gpui_app::GpuiMdbijouApp, theme};
-use gpui::{
-    px, size, App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions,
+use crate::{
+    assets::Assets,
+    cli, config,
+    document::Document,
+    gpui_lifecycle::{WindowLifecycle, WindowRequest},
+    theme,
 };
-use gpui_component::{Root, TitleBar};
+use gpui::{App, Application, KeyBinding};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 struct RemoteImageHttpClient {
@@ -137,11 +140,15 @@ pub fn run() {
     let mut cfg = config::load();
     cli::apply_to_config(&options, &mut cfg);
     let document = document_from_path(path);
-    let (open_tx, open_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = futures::channel::mpsc::unbounded();
 
     let application = Application::new()
         .with_assets(Assets)
         .with_http_client(Arc::new(RemoteImageHttpClient::new()));
+    let reopen_tx = request_tx.clone();
+    application.on_reopen(move |_| {
+        let _ = reopen_tx.unbounded_send(WindowRequest::Reopen);
+    });
     application.on_open_urls(move |urls| {
         for url in urls {
             let Ok(url) = url::Url::parse(&url) else {
@@ -150,7 +157,7 @@ pub fn run() {
             let Ok(path) = url.to_file_path() else {
                 continue;
             };
-            let _ = open_tx.send(path);
+            let _ = request_tx.unbounded_send(WindowRequest::OpenFile(path));
         }
     });
     application.run(move |cx: &mut App| {
@@ -158,20 +165,13 @@ pub fn run() {
         set_dock_icon();
         gpui_component::init(cx);
         bind_app_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1024.0), px(760.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitleBar::title_bar_options()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let view = cx.new(|cx| GpuiMdbijouApp::new(document, cfg, open_rx, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .expect("open GPUI window");
-        cx.activate(true);
+        match WindowLifecycle::new(document, cfg, cx) {
+            Ok(lifecycle) => lifecycle.listen(request_rx, cx),
+            Err(error) => {
+                eprintln!("could not open document window: {error}");
+                cx.quit();
+            }
+        }
     });
 }
 
